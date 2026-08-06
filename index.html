@@ -53,13 +53,15 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
+const APP_BUILD = "2026-08-06 20:08";
+
 /* =====================================================================
    caderneta — camada de compatibilidade
    Substitui lucide-react, recharts e window.storage por código próprio,
    para o app não depender de nenhuma biblioteca externa.
    ===================================================================== */
 
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useReducer } = React;
 
 /* ------------------------------------------------------------- ícones */
 const Svg = (props) => React.createElement("svg", {
@@ -2795,6 +2797,9 @@ function Ajustes({ d, setD, onClose, flash }) {
             </div>
             <p style={{ color: C.muted }} className="text-xs mt-3">
               O app sempre grava primeiro neste aparelho, por isso nunca trava esperando a internet.
+            </p>
+            <p style={{ color: C.muted, fontFamily: MONO, borderTop: `1px solid ${C.line}` }} className="text-xs mt-4 pt-3">
+              versão do app: {typeof APP_BUILD !== "undefined" ? APP_BUILD : "local"}
             </p>
           </>
         )}
