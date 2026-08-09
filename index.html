@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-08 19:25";
+const APP_BUILD = "2026-08-09 12:13";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1158,7 +1158,10 @@ function Aplicacao() {
   /* busca novidades: ao voltar para o app, ao reconectar, e a cada minuto */
   useEffect(() => {
     if (!d?.sheetsUrl) return;
-    const puxar = () => document.visibilityState === "visible" && sincronizar(d, { silencioso: true });
+    // usa dRef.current, não "d": este efeito só se recria quando o endereço
+    // muda, então "d" aqui ficaria congelado na primeira vez — e cada
+    // sincronia automática mandaria uma foto antiga por cima da atual
+    const puxar = () => document.visibilityState === "visible" && sincronizar(dRef.current, { silencioso: true });
     const relogio = setInterval(puxar, 60000);
     document.addEventListener("visibilitychange", puxar);
     window.addEventListener("online", puxar);
