@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-09 17:29";
+const APP_BUILD = "2026-08-10 19:00";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1075,11 +1075,18 @@ function Aplicacao() {
   useEffect(() => {
     if (!d) return;
     clearTimeout(timer.current);
-    setSync((s) => (s.estado === "erro" ? s : { ...s, estado: "pendente" }));
     timer.current = setTimeout(async () => {
       // 1. local primeiro, sempre. isto nunca falha por causa da rede.
       try { await window.storage.set("caderneta:v3", JSON.stringify(d)); } catch (e) { /* segue em memória */ }
-      // 2. nuvem depois, sem segurar a tela.
+
+      // 2. só mexe no indicador e na rede se houver algo de fato para mandar.
+      // Sem isso, mudar o endereço ou a frase secreta em Ajustes — que não são
+      // dado financeiro — deixava a pílula presa em "salvando", porque a
+      // sincronia desistia sem avisar que tinha terminado.
+      if (!d.sheetsUrl) { setSync({ estado: "local", quando: null }); return; }
+      const { mudancas } = detectarMudancas(baseSync.current, d);
+      if (!mudancas.length) return;
+      setSync((s) => (s.estado === "erro" ? s : { ...s, estado: "pendente" }));
       sincronizar(d);
     }, 400);
   }, [d]);
@@ -1092,7 +1099,7 @@ function Aplicacao() {
   const dRef = useRef(null);
   dRef.current = d;
 
-  const sincronizar = async (dados, { silencioso = false } = {}) => {
+  const sincronizar = async (dados) => {
     const url = dados?.sheetsUrl;
     if (!url) { setSync({ estado: "local", quando: null }); return; }
     if (!navigator.onLine) { setSync({ estado: "offline", quando: null }); return; }
@@ -1100,7 +1107,6 @@ function Aplicacao() {
     emCurso.current = true;
 
     const { mudancas, estado } = detectarMudancas(baseSync.current, dados);
-    if (!silencioso && !mudancas.length && sync.estado === "ok") { emCurso.current = false; return; }
     setSync((s) => ({ ...s, estado: "enviando" }));
 
     try {
@@ -1162,7 +1168,7 @@ function Aplicacao() {
     // usa dRef.current, não "d": este efeito só se recria quando o endereço
     // muda, então "d" aqui ficaria congelado na primeira vez — e cada
     // sincronia automática mandaria uma foto antiga por cima da atual
-    const puxar = () => document.visibilityState === "visible" && sincronizar(dRef.current, { silencioso: true });
+    const puxar = () => document.visibilityState === "visible" && sincronizar(dRef.current);
     const relogio = setInterval(puxar, 60000);
     document.addEventListener("visibilitychange", puxar);
     window.addEventListener("online", puxar);
