@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-10 19:00";
+const APP_BUILD = "2026-08-10 19:07";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -288,10 +288,27 @@ const COLECOES = ["lancamentos", "contas", "cartoes", "categorias", "recorrentes
 /* Chaves que são configuração do aparelho, não dado compartilhado. */
 const SO_LOCAL = ["sheetsUrl", "sheetsSegredo", "ateOnde", "painelAgora", "v"];
 
-/* Compara dois registros ignorando o carimbo. */
+/** JSON.stringify(obj) com as chaves sempre na mesma ordem (alfabética),
+    em qualquer profundidade. Sem isso, dois objetos com o mesmo conteúdo mas
+    montados por caminhos diferentes — por exemplo um lançamento local contra
+    o mesmo lançamento depois de ir e voltar da planilha — viram textos
+    diferentes, e a sincronia nunca se dá por satisfeita: manda de novo,
+    recebe de volta, acha diferente de novo, sem fim. */
+function establizado(v) {
+  if (Array.isArray(v)) return v.map(establizado);
+  if (v && typeof v === "object") {
+    const chaves = Object.keys(v).sort();
+    const o = {};
+    for (const k of chaves) o[k] = establizado(v[k]);
+    return o;
+  }
+  return v;
+}
+
+/* Compara dois registros ignorando o carimbo e a ordem das chaves. */
 const mesmoConteudo = (a, b) => {
   if (!a || !b) return false;
-  const limpo = (r) => { const { mEm, ...resto } = r; return JSON.stringify(resto); };
+  const limpo = (r) => { const { mEm, ...resto } = r; return JSON.stringify(establizado(resto)); };
   return limpo(a) === limpo(b);
 };
 
