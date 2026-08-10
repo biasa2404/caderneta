@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-09 12:13";
+const APP_BUILD = "2026-08-09 17:29";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1045,6 +1045,7 @@ function Aplicacao() {
   const [lista, setLista] = useState(null);       // { titulo, sub, itens }
   const [conta, setConta] = useState(null);      // id da caixinha aberta
   const [lancando, setLancando] = useState(false);   // painel do botão flutuante
+  const [detalheSync, setDetalheSync] = useState(false);
   const timer = useRef(null);
   const retry = useRef(null);
   const tentativa = useRef(0);
@@ -1305,7 +1306,7 @@ function Aplicacao() {
         </header>
 
         <main className="flex-1 p-4 pb-28 md:pb-8 md:pt-6">
-          <Barra {...ctx} sync={sync} />
+          <Barra {...ctx} sync={sync} verSync={() => setDetalheSync(true)} />
           {tab === "lancar" && <Lancar {...ctx} />}
           {tab === "agora" && <Agora {...ctx} />}
           {tab === "futuro" && <Futuro {...ctx} />}
@@ -1336,6 +1337,12 @@ function Aplicacao() {
         <Painel titulo="Novo lançamento" onClose={() => setLancando(false)}>
           <FormLancamento d={d} catOf={catOf} salvar={salvar} flash={flash} aoSalvar={() => setLancando(false)} />
         </Painel>
+      )}
+
+      {detalheSync && (
+        <DetalheSync sync={sync} onClose={() => setDetalheSync(false)}
+          onTestar={() => { sincronizar(d); setDetalheSync(false); }}
+          onConferirTudo={() => { setD({ ...d, ateOnde: 0 }); setDetalheSync(false); flash("Conferindo tudo com a planilha…"); }} />
       )}
 
       {toast && (
@@ -1409,25 +1416,68 @@ const ESTADOS = {
   erro:      { cor: "#C42B5C", txt: "falhou · tentando de novo" },
 };
 
-function SyncBadge({ sync }) {
+function SyncBadge({ sync, onAbrir }) {
   const e = ESTADOS[sync?.estado] || ESTADOS.local;
   const pulsa = sync?.estado === "enviando" || sync?.estado === "pendente";
-  const quando = sync?.quando
-    ? new Date(sync.quando).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
-    : null;
+  const clicavel = sync?.estado === "erro" || sync?.estado === "ok";
   return (
-    <span title={quando ? `Última sincronia às ${quando}` : e.txt}
-      style={{ background: e.cor + "1A", color: e.cor }}
+    <button onClick={clicavel ? onAbrir : undefined} disabled={!clicavel}
+      aria-label={clicavel ? "Detalhes da sincronia" : e.txt}
+      style={{ background: e.cor + "1A", color: e.cor, cursor: clicavel ? "pointer" : "default" }}
       className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium shrink-0">
       <span style={{ background: e.cor }}
         className={"w-2 h-2 rounded-full inline-block shrink-0" + (pulsa ? " animate-pulse" : "")} />
-      {e.txt}{sync?.estado === "ok" && quando ? ` ${quando}` : ""}
-    </span>
+      {e.txt}
+    </button>
+  );
+}
+
+/** Painel com o texto completo do erro e o que fazer a respeito.
+    Existe porque no celular não há como "passar o mouse" sobre nada. */
+function DetalheSync({ sync, onClose, onTestar, onConferirTudo }) {
+  const e = ESTADOS[sync?.estado] || ESTADOS.local;
+  const quando = sync?.quando
+    ? new Date(sync.quando).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : null;
+
+  const dica = (msg) => {
+    const m = (msg || "").toLowerCase();
+    if (m.includes("404")) return "O endereço não corresponde a uma implantação ativa do Apps Script. Confira Implantar → Gerenciar implantações, e cole de novo o endereço /exec que aparecer lá.";
+    if (m.includes("segredo")) return "A frase secreta no app não é igual à do script. Confira maiúsculas e espaços nas duas pontas.";
+    if (m.includes("failed to fetch") || m.includes("networkerror")) return "Não deu para alcançar o endereço. Confira sua internet, ou se o endereço está correto.";
+    if (m.includes("resposta 5")) return "O Apps Script respondeu com erro interno. Tente de novo em um minuto — ele pode estar processando outra sincronia.";
+    return "Verifique o endereço e a frase secreta em Ajustes → Dados.";
+  };
+
+  return (
+    <Painel titulo="Sincronia" sub={quando ? `Última confirmada às ${quando}` : undefined} onClose={onClose}
+      rodape={
+        <div className="flex gap-2">
+          <button onClick={onTestar} style={{ background: C.ink }} className="flex-1 rounded-xl py-2.5 text-sm text-white font-medium">Tentar agora</button>
+          <button onClick={onConferirTudo} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm">Conferir tudo</button>
+        </div>
+      }>
+      <div className="flex items-center gap-2 mb-3">
+        <span style={{ background: e.cor }} className="w-2.5 h-2.5 rounded-full inline-block shrink-0" />
+        <span style={{ color: e.cor }} className="font-medium">{e.txt}</span>
+      </div>
+      {sync?.estado === "erro" && sync?.msg && (
+        <>
+          <Rotulo>O que o Google respondeu</Rotulo>
+          <pre style={{ background: C.surface, color: C.out, borderColor: C.line }}
+            className="rounded-xl border p-3 text-xs overflow-auto mb-3 whitespace-pre-wrap">{sync.msg}</pre>
+          <p style={{ color: C.muted }} className="text-sm">{dica(sync.msg)}</p>
+        </>
+      )}
+      {sync?.estado === "ok" && (
+        <p style={{ color: C.muted }} className="text-sm">Tudo certo. O app confere novidades sozinho a cada minuto.</p>
+      )}
+    </Painel>
   );
 }
 
 /* ============================================ assinatura: estados do dinheiro */
-function Barra({ disponivel, comprometidoMes, comprometidoGeral, totalGuardado, totalInvestido, totalFisico, totalBancos, aReceber, sync }) {
+function Barra({ disponivel, comprometidoMes, comprometidoGeral, totalGuardado, totalInvestido, totalFisico, totalBancos, aReceber, sync, verSync }) {
   const partes = [
     { n: "Disponível", v: Math.max(disponivel, 0), c: C.in },
     { n: "Comprometido", v: comprometidoMes, c: C.due },
@@ -1450,7 +1500,7 @@ function Barra({ disponivel, comprometidoMes, comprometidoGeral, totalGuardado, 
             {aReceber > 0 && <span style={{ color: C.in }}> · {brl(aReceber)} a receber</span>}
           </div>
         </div>
-        <SyncBadge sync={sync} />
+        <SyncBadge sync={sync} onAbrir={verSync} />
       </div>
 
       {disponivel < 0 && (
