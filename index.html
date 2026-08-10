@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-10 19:07";
+const APP_BUILD = "2026-08-10 22:53";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1297,7 +1297,21 @@ function Aplicacao() {
     }));
   };
 
-  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, flash,
+  /** Apaga a conta fixa inteira: futuras cobranças somem, as já pagas ficam
+      como histórico. Complementa apagar(), que só cuida de uma ocorrência. */
+  const apagarRecorrencia = (recId) => {
+    const nome = d.recorrentes.find((r) => r.id === recId)?.nome || "Conta fixa";
+    comDesfazer(`"${nome}" apagada — próximas cobranças removidas`, () => setD({
+      ...d,
+      recorrentes: d.recorrentes.filter((r) => r.id !== recId),
+      lancamentos: d.lancamentos.filter((l) => !(l.recId === recId && l.status === "pendente")),
+    }));
+  };
+
+  /** Cria uma conta fixa a partir do formulário de lançar, sem passar por Ajustes. */
+  const criarRecorrente = (rec) => setD({ ...d, recorrentes: [...d.recorrentes, rec] });
+
+  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M };
 
@@ -1358,7 +1372,7 @@ function Aplicacao() {
 
       {lancando && (
         <Painel titulo="Novo lançamento" onClose={() => setLancando(false)}>
-          <FormLancamento d={d} catOf={catOf} salvar={salvar} flash={flash} aoSalvar={() => setLancando(false)} />
+          <FormLancamento d={d} catOf={catOf} salvar={salvar} criarRecorrente={criarRecorrente} flash={flash} aoSalvar={() => setLancando(false)} />
         </Painel>
       )}
 
@@ -1674,7 +1688,7 @@ function formInicial(ref) {
     tipo: "saida", pago: true, cents: 0, nome: "",
     catId: ref.catPadrao("saida"), subId: null,
     forma: "Pix", instr: ref.primeiraConta, destino: ref.primeiroDestino,
-    venc: ref.hoje, parcelas: "1", obs: "", reemb: false, deQuem: "",
+    venc: ref.hoje, parcelas: "1", obs: "", reemb: false, deQuem: "", repetir: false,
     tocados: {},        // campos que você mexeu na mão
     sugestao: null,     // de onde veio o preenchimento automático
   };
@@ -1701,7 +1715,8 @@ function reduzForm(e, a) {
         forma: t === "saida" ? e.forma : "Pix",
         instr: t === "saida" && e.forma === "Crédito" ? e.instr : ref.primeiraConta,
         deQuem: t === "saida" ? e.deQuem : "",
-        reemb: t === "saida" ? e.reemb : false };
+        reemb: t === "saida" ? e.reemb : false,
+        repetir: t === "saida" ? e.repetir : false };
     }
 
     case "trocarForma": {
@@ -1744,6 +1759,12 @@ function reduzForm(e, a) {
       return { ...formInicial(ref), tipo: e.tipo, nome: e.nome, cents: e.cents, venc: e.venc,
         catId: ref.catPadrao(e.tipo) };
 
+    /* liga ou desliga "repete todo mês". As duas coisas — parcelar e repetir —
+       representam ideias diferentes (uma dívida dividida vs. uma conta que
+       volta todo mês), então uma desliga a outra. */
+    case "repetir":
+      return { ...e, repetir: a.valor, parcelas: a.valor ? "1" : e.parcelas };
+
     case "limpar":
       // mantém o tipo escolhido, mas a categoria tem que ser a padrão DESSE tipo
       return { ...formInicial(ref), tipo: e.tipo, catId: ref.catPadrao(e.tipo) };
@@ -1757,7 +1778,7 @@ function reduzForm(e, a) {
 /* ---------------------------------------------------- formulário de lançamento */
 /* Vive fora da aba para poder aparecer também no painel do botão flutuante:
    o mesmo formulário, com o mesmo comportamento, em dois lugares. */
-function FormLancamento({ d, catOf, salvar, flash, aoSalvar }) {
+function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) {
   /* ------------------------------------- um estado só, com as regras no redutor */
   const catPadrao = (t) => (t === "entrada"
     ? (d.categorias.find((c) => c.id === "renda") || d.categorias[0])?.id
@@ -1779,7 +1800,7 @@ function FormLancamento({ d, catOf, salvar, flash, aoSalvar }) {
 
   /* nomes curtos para o que a tela usa o tempo todo */
   const { tipo, pago, cents, nome, catId, subId, forma, instr, destino,
-    venc, parcelas, obs, reemb, deQuem, sugestao } = f;
+    venc, parcelas, obs, reemb, deQuem, sugestao, repetir } = f;
   const nParc = Math.min(48, Math.max(1, parseInt(parcelas, 10) || 1));
   const v = cents / 100;
   const credito = forma === "Crédito";
@@ -1811,9 +1832,25 @@ function FormLancamento({ d, catOf, salvar, flash, aoSalvar }) {
       status: pago ? "pago" : "pendente", pagamento: pago ? venc : null,
       parcelas: nParc > 1 ? nParc : undefined,
     };
-    if (tipo === "transferencia") salvar({ ...base, contaId: instr, destinoId: destino });
-    else if (credito) salvar({ ...base, cartaoId: instr, contaId: null });
-    else salvar({ ...base, contaId: instr, cartaoId: null });
+    const comConta = tipo === "transferencia" ? { ...base, contaId: instr, destinoId: destino }
+      : credito ? { ...base, cartaoId: instr, contaId: null }
+      : { ...base, contaId: instr, cartaoId: null };
+
+    if (repetir && tipo === "saida") {
+      // cria a definição da conta fixa e, na mesma tacada, o lançamento deste
+      // mês — com o mesmo "src" que gerar() usaria, para não duplicar no
+      // próximo carregamento
+      const recId = uid();
+      const dia = Math.min(28, +venc.slice(8, 10) || 1);
+      criarRecorrente({ id: recId, nome: comConta.nome, valor: v, dia,
+        catId: comConta.catId, subId: comConta.subId, forma: comConta.forma,
+        contaId: comConta.contaId || undefined, cartaoId: comConta.cartaoId || undefined,
+        variavel: false, fim: { tipo: "nunca" } });
+      salvar({ ...comConta, recId, src: `${recId}#${ym(venc)}` });
+      flash("Virou uma conta fixa");
+    } else {
+      salvar(comConta);
+    }
     dispara({ tipo: "limpar" }); setMais(false);
     aoSalvar?.();
   };
@@ -1931,13 +1968,29 @@ function FormLancamento({ d, catOf, salvar, flash, aoSalvar }) {
               <input type="date" value={venc} onChange={(e) => campo("venc", e.target.value)} style={{ background: C.bg, borderColor: C.line }}
                 className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
             {tipo === "saida" && (
-              <div><Rotulo>Parcelas</Rotulo>
-                <input inputMode="numeric" value={parcelas}
-                  onChange={(e) => campo("parcelas", e.target.value.replace(/\D/g, "").slice(0, 2))}
-                  onFocus={(e) => e.target.select()}
-                  onBlur={() => campo("parcelas", String(nParc))}
-                  style={{ background: C.bg, borderColor: C.line, color: C.ink, fontFamily: MONO }} className="w-full rounded-xl border px-3 py-2 outline-none" />
-                {nParc > 1 && <p style={{ color: C.muted, fontFamily: MONO }} className="text-xs mt-1">{nParc}× {brl(v / nParc)}</p>}</div>
+              <div>
+                <Rotulo>{repetir ? "Repete todo mês" : "Parcelas"}</Rotulo>
+                {repetir ? (
+                  <button onClick={() => dispara({ tipo: "repetir", valor: false })}
+                    style={{ background: C.tr, color: "#fff" }}
+                    className="w-full rounded-xl py-2 text-sm font-medium flex items-center justify-center gap-1.5">
+                    <Repeat size={14} /> vira conta fixa · toque para desligar
+                  </button>
+                ) : (
+                  <input inputMode="numeric" value={parcelas}
+                    onChange={(e) => campo("parcelas", e.target.value.replace(/\D/g, "").slice(0, 2))}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => campo("parcelas", String(nParc))}
+                    style={{ background: C.bg, borderColor: C.line, color: C.ink, fontFamily: MONO }} className="w-full rounded-xl border px-3 py-2 outline-none" />
+                )}
+                {!repetir && nParc > 1 && <p style={{ color: C.muted, fontFamily: MONO }} className="text-xs mt-1">{nParc}× {brl(v / nParc)}</p>}
+                {!repetir && nParc === 1 && (
+                  <button onClick={() => dispara({ tipo: "repetir", valor: true })} style={{ color: C.tr }}
+                    className="text-xs underline underline-offset-2 mt-1">
+                    é uma conta fixa? repete todo mês
+                  </button>
+                )}
+              </div>
             )}
             <div className="sm:col-span-2"><Rotulo>Observações</Rotulo>
               <input value={obs} onChange={(e) => campo("obs", e.target.value)} placeholder="Ex.: saquei do Nubank para pagar em dinheiro"
@@ -1972,7 +2025,7 @@ function FormLancamento({ d, catOf, salvar, flash, aoSalvar }) {
 }
 
 /* ================================================================ lançar */
-function Lancar({ d, catOf, subOf, contaOf, cartaoOf, salvar, apagar, up, pagar, anulado, abrir, flash }) {
+function Lancar({ d, catOf, subOf, contaOf, cartaoOf, salvar, criarRecorrente, apagar, up, pagar, anulado, abrir, flash }) {
   const [janela, setJanela] = useState(1);   // abre em "Este mês"
   const [ordem, setOrdem] = useState("registro");   // "registro" ou "data"
   const [de, setDe] = useState("");
@@ -2005,7 +2058,7 @@ function Lancar({ d, catOf, subOf, contaOf, cartaoOf, salvar, apagar, up, pagar,
 
   return (
     <>
-      <FormLancamento d={d} catOf={catOf} salvar={salvar} flash={flash} />
+      <FormLancamento d={d} catOf={catOf} salvar={salvar} criarRecorrente={criarRecorrente} flash={flash} />
 
       <div className="flex items-center justify-between gap-2 mt-6 mb-3">
         <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold">Lançamentos</h2>
@@ -2342,9 +2395,12 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
   const max = Math.max(1, ...meses.map(([, ls]) => ls.filter((l) => l.status === "pendente").reduce((s, l) => s + emC(l.valor), 0) / 100));
 
   const addIntencao = () => {
-    const v = num(valor); if (!nome || v <= 0) return;
+    const v = num(valor);
+    if (!nome.trim()) { flash("Dê um nome para a intenção"); return; }
+    if (v <= 0) { flash("Digite um valor maior que zero"); return; }
     setD({ ...d, intencoes: [...(d.intencoes || []), { id: uid(), nome, valor: v, obs: "" }] });
     setNome(""); setValor("");
+    flash("Intenção anotada");
   };
   const virarConta = (i) => {
     setD({ ...d, intencoes: d.intencoes.filter((x) => x.id !== i.id),
@@ -2805,7 +2861,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
 }
 
 /* ================================================================ ajustes */
-function Ajustes({ d, setD, onClose, flash }) {
+function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia }) {
   const [aba, setAba] = useState("categorias");
   const set = (patch) => setD({ ...d, ...patch });
 
@@ -2848,7 +2904,7 @@ function Ajustes({ d, setD, onClose, flash }) {
         {aba === "categorias" && <AbaCategorias d={d} set={set} flash={flash} />}
         {aba === "contas" && <AbaContas d={d} set={set} flash={flash} />}
         {aba === "cartoes" && <AbaCartoes d={d} set={set} flash={flash} />}
-        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} />}
+        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} />}
         {aba === "dados" && (
           <>
             <Rotulo>Sincronia com a planilha</Rotulo>
@@ -2884,6 +2940,20 @@ function Ajustes({ d, setD, onClose, flash }) {
             </div>
             <p style={{ color: C.muted }} className="text-xs mt-3">
               O app sempre grava primeiro neste aparelho, por isso nunca trava esperando a internet.
+            </p>
+
+            <Rotulo>Apagar tudo</Rotulo>
+            <BotaoConfirma
+              onConfirm={() => comDesfazer(`${d.lancamentos.length} lançamentos apagados`, () =>
+                setD({ ...d, lancamentos: [], cancelados: [] }))}
+              pergunta="Apagar todos os lançamentos" cor={C.out} estilo={{ borderColor: C.line }}
+              className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5">
+              <Trash2 size={15} /> Apagar todos os lançamentos
+            </BotaoConfirma>
+            <p style={{ color: C.muted }} className="text-xs mt-2">
+              Isto não muda o saldo de partida das suas contas — só o que aconteceu depois dele.
+              Se quiser as contas em zero, ajuste o saldo inicial em <b>Contas</b>, na aba ao lado.
+              Contas fixas continuam gerando as próximas cobranças normalmente.
             </p>
             <p style={{ color: C.muted, fontFamily: MONO, borderTop: `1px solid ${C.line}` }} className="text-xs mt-4 pt-3">
               versão do app: {typeof APP_BUILD !== "undefined" ? APP_BUILD : "local"}
@@ -2938,7 +3008,8 @@ function AbaCategorias({ d, set, flash }) {
                 <div className="flex gap-2">
                   <input value={subNome} onChange={(e) => setSubNome(e.target.value)} placeholder="Nova subcategoria"
                     style={{ background: C.bg, borderColor: C.line }} className="flex-1 rounded-lg border px-2 py-1.5 text-xs outline-none" />
-                  <button onClick={() => { if (!subNome) return; upCat(c.id, { subs: [...(c.subs || []), { id: uid(), nome: subNome }] }); setSubNome(""); }}
+                  <button onClick={() => { if (!subNome.trim()) { flash("Dê um nome para a subcategoria"); return; }
+                      upCat(c.id, { subs: [...(c.subs || []), { id: uid(), nome: subNome }] }); setSubNome(""); flash("Subcategoria criada"); }}
                     style={{ background: C.ink, color: "#fff" }} className="px-3 rounded-lg text-xs">Criar</button>
                 </div>
               </div>
@@ -2949,7 +3020,8 @@ function AbaCategorias({ d, set, flash }) {
       <div className="flex gap-2">
         <input value={nova} onChange={(e) => setNova(e.target.value)} placeholder="Nova categoria"
           style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <button onClick={() => { if (!nova) return; set({ categorias: [...d.categorias, { id: uid(), nome: nova, cor: "#727892", orcamento: 0, subs: [] }] }); setNova(""); }}
+        <button onClick={() => { if (!nova.trim()) { flash("Dê um nome para a categoria"); return; }
+            set({ categorias: [...d.categorias, { id: uid(), nome: nova, cor: "#727892", orcamento: 0, subs: [] }] }); setNova(""); flash("Categoria criada"); }}
           style={{ background: C.ink, color: "#fff" }} className="px-4 rounded-xl text-sm">Criar</button>
       </div>
     </>
@@ -2975,7 +3047,9 @@ function AbaContas({ d, set, flash }) {
             <BotaoConfirma onConfirm={() => {
               const usos = d.lancamentos.filter((l) => l.contaId === c.id || l.destinoId === c.id).length;
               const cartoes = d.cartoes.filter((k) => k.contaPagamentoId === c.id).length;
+              const fixas = d.recorrentes.filter((r) => r.contaId === c.id).length;
               if (cartoes) return flash(`${cartoes} cartão(ões) pagam por esta conta. Troque a conta deles primeiro.`);
+              if (fixas) return flash(`${fixas} conta(s) fixa(s) usam esta conta. Troque em Recorrentes primeiro.`);
               if (usos) flash(`${c.nome} tinha ${usos} lançamento(s), que ficaram sem conta.`);
               set({ contas: d.contas.filter((x) => x.id !== c.id) });
             }} pergunta="Apagar conta" cor={C.muted} titulo="Apagar conta"><Trash2 size={14} /></BotaoConfirma>
@@ -3003,7 +3077,8 @@ function AbaContas({ d, set, flash }) {
           style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none" />
         <input value={saldo} onChange={(e) => setSaldo(e.target.value)} placeholder="Saldo" inputMode="decimal"
           style={{ background: C.surface, borderColor: C.line }} className="w-24 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <button onClick={() => { if (!nome) return; set({ contas: [...d.contas, { id: uid(), nome, tipo, saldoInicial: num(saldo) }] }); setNome(""); setSaldo(""); }}
+        <button onClick={() => { if (!nome.trim()) { flash("Dê um nome para a conta"); return; }
+            set({ contas: [...d.contas, { id: uid(), nome, tipo, saldoInicial: num(saldo) }] }); setNome(""); setSaldo(""); flash("Conta criada"); }}
           style={{ background: C.ink, color: "#fff" }} className="px-4 rounded-xl text-sm">Criar</button>
       </div>
     </>
@@ -3023,7 +3098,9 @@ function AbaCartoes({ d, set, flash }) {
               <input value={c.nome} onChange={(e) => upC(c.id, { nome: e.target.value })} className="flex-1 text-sm bg-transparent outline-none" />
               <BotaoConfirma onConfirm={() => {
                 const abertas = d.lancamentos.filter((l) => l.cartaoId === c.id && l.status === "pendente").length;
+                const fixas = d.recorrentes.filter((r) => r.cartaoId === c.id).length;
                 if (abertas) return flash(`${c.nome} tem ${abertas} compra(s) em aberto. Pague ou apague antes.`);
+                if (fixas) return flash(`${fixas} conta(s) fixa(s) usam este cartão. Troque em Recorrentes primeiro.`);
                 set({ cartoes: d.cartoes.filter((x) => x.id !== c.id) });
               }} pergunta="Apagar cartão" cor={C.muted} titulo="Apagar cartão"><Trash2 size={14} /></BotaoConfirma>
             </div>
@@ -3035,9 +3112,11 @@ function AbaCartoes({ d, set, flash }) {
                   {d.contas.filter((x) => x.tipo === "banco" || x.tipo === "fisico").map((x) => <option key={x.id} value={x.id}>{x.nome}</option>)}
                 </select></label>
               <label style={{ color: C.muted }}>Fecha dia
-                <input type="number" min="1" max="28" value={c.fecha} onChange={(e) => upC(c.id, { fecha: +e.target.value })} style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="w-full rounded-lg border px-2 py-1 mt-0.5 outline-none" /></label>
+                <CampoInteiro valor={c.fecha} onValor={(n) => upC(c.id, { fecha: n })} min={1} max={28}
+                  style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="w-full rounded-lg border px-2 py-1 mt-0.5 outline-none" /></label>
               <label style={{ color: C.muted }}>Vence dia
-                <input type="number" min="1" max="28" value={c.vence} onChange={(e) => upC(c.id, { vence: +e.target.value })} style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="w-full rounded-lg border px-2 py-1 mt-0.5 outline-none" /></label>
+                <CampoInteiro valor={c.vence} onValor={(n) => upC(c.id, { vence: n })} min={1} max={28}
+                  style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="w-full rounded-lg border px-2 py-1 mt-0.5 outline-none" /></label>
             </div>
           </div>
         ))}
@@ -3047,14 +3126,15 @@ function AbaCartoes({ d, set, flash }) {
           style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none" />
         <input value={f.dono} onChange={(e) => setF({ ...f, dono: e.target.value })} placeholder="Dono"
           style={{ background: C.surface, borderColor: C.line }} className="w-24 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <button onClick={() => { if (!f.nome) return; set({ cartoes: [...d.cartoes, { ...f, id: uid() }] }); setF({ ...f, nome: "" }); }}
+        <button onClick={() => { if (!f.nome.trim()) { flash("Dê um nome para o cartão"); return; }
+            set({ cartoes: [...d.cartoes, { ...f, id: uid() }] }); setF({ ...f, nome: "" }); flash("Cartão criado"); }}
           style={{ background: C.ink, color: "#fff" }} className="px-4 rounded-xl text-sm">Criar</button>
       </div>
     </>
   );
 }
 
-function AbaRecorrentes({ d, set, flash }) {
+function AbaRecorrentes({ d, set, flash, apagarRecorrencia }) {
   const [aberta, setAberta] = useState(null);
   const [nova, setNova] = useState(false);
   const upR = (id, patch) => set({ recorrentes: d.recorrentes.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
@@ -3082,12 +3162,7 @@ function AbaRecorrentes({ d, set, flash }) {
           <EditorRecorrente key={r.id} r={r} d={d} contasUso={contasUso}
             aberta={aberta === r.id} onToggle={() => setAberta(aberta === r.id ? null : r.id)}
             upR={upR} flash={flash}
-            onApagar={() => {
-              const geradas = d.lancamentos.filter((l) => l.recId === r.id && l.status === "pendente").length;
-              set({ recorrentes: d.recorrentes.filter((x) => x.id !== r.id) });
-              setAberta(null);
-              flash(geradas ? `Apagada. As ${geradas} cobranças já geradas continuam na lista.` : "Conta fixa apagada");
-            }} />
+            onApagar={() => { apagarRecorrencia(r.id); setAberta(null); }} />
         ))}
         {d.recorrentes.length === 0 && <Vazio>Nenhuma conta fixa cadastrada.</Vazio>}
       </div>
@@ -3106,7 +3181,8 @@ function AbaRecorrentes({ d, set, flash }) {
 /** Uma conta fixa: resumo fechado, todos os campos quando aberta. */
 function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, flash }) {
   const [cents, setCents] = useState(Math.round((r.valor || 0) * 100));
-  useEffect(() => { setCents(Math.round((r.valor || 0) * 100)); }, [r.id]);
+  const [diaTxt, setDiaTxt] = useState(String(r.dia || 1));
+  useEffect(() => { setCents(Math.round((r.valor || 0) * 100)); setDiaTxt(String(r.dia || 1)); }, [r.id]);
   const inp = { background: C.bg, borderColor: C.line, color: C.ink };
   const cat = d.categorias.find((c) => c.id === r.catId);
   const via = r.forma === "Crédito"
@@ -3142,8 +3218,10 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
                 onChange={(e) => { const c = +(e.target.value.replace(/\D/g, "").slice(0, 9) || 0); setCents(c); upR(r.id, { valor: c / 100 }); }}
                 inputMode="numeric" style={{ ...inp, fontFamily: MONO }} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
             <div><Rotulo>Vence todo dia</Rotulo>
-              <input type="number" min="1" max="28" value={r.dia}
-                onChange={(e) => upR(r.id, { dia: Math.min(28, Math.max(1, +e.target.value || 1)) })}
+              <input inputMode="numeric" value={diaTxt}
+                onChange={(e) => setDiaTxt(e.target.value.replace(/\D/g, "").slice(0, 2))}
+                onFocus={(e) => e.target.select()}
+                onBlur={() => { const n = Math.min(28, Math.max(1, parseInt(diaTxt, 10) || 1)); setDiaTxt(String(n)); upR(r.id, { dia: n }); }}
                 style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
           </div>
 
@@ -3207,7 +3285,7 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
                   style={inp} className="rounded-lg border px-2 py-1 text-xs outline-none" />
               )}
               {r.fim?.tipo === "vezes" && (
-                <input type="number" min="1" value={r.fim.vezes || 12} onChange={(e) => upR(r.id, { fim: { tipo: "vezes", vezes: Math.max(1, +e.target.value || 1) } })}
+                <CampoInteiro valor={r.fim.vezes || 12} onValor={(n) => upR(r.id, { fim: { tipo: "vezes", vezes: n } })} min={1} max={99}
                   style={inp} className="w-20 rounded-lg border px-2 py-1 text-xs outline-none" />
               )}
             </div>
@@ -3302,7 +3380,7 @@ function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, car
 }
 
 /** Detalhe de um lançamento, com edição de todos os campos. */
-function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, salvar, pagar, despagar, anulado, flash }) {
+function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, apagarRecorrencia, salvar, pagar, despagar, anulado, flash }) {
   const [edit, setEdit] = useState(false);
   const [f, setF] = useState(null);
 
@@ -3485,8 +3563,7 @@ function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios,
           {irmas.length <= 1 && f.tipo !== "transferencia" && (
             <div><Rotulo>Parcelas</Rotulo>
               <div className="flex items-center gap-2">
-                <input inputMode="numeric" value={f.parcelas || 1}
-                  onChange={(e) => setF({ ...f, parcelas: Math.min(48, Math.max(1, parseInt(e.target.value.replace(/\D/g, ""), 10) || 1)) })}
+                <CampoInteiro valor={f.parcelas || 1} onValor={(n) => setF({ ...f, parcelas: n })} min={1} max={48}
                   style={{ ...inp, fontFamily: MONO }} className="w-20 rounded-xl border px-3 py-2 text-sm outline-none" />
                 {(f.parcelas || 1) > 1 && (
                   <span style={{ color: C.due, fontFamily: MONO }} className="text-xs">
@@ -3567,6 +3644,19 @@ function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios,
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {l.recId && (
+            <div style={{ background: C.due + "14" }} className="rounded-xl p-3 mt-5">
+              <p style={{ color: C.due }} className="text-xs mb-2 flex items-center gap-1.5">
+                <Repeat size={13} /> Isto é uma conta fixa. O botão de apagar no rodapé remove só esta cobrança.
+              </p>
+              <BotaoConfirma onConfirm={() => { apagarRecorrencia(l.recId); onClose(); }}
+                pergunta="Apagar a recorrência inteira" cor={C.due}
+                className="w-full rounded-lg border py-1.5 text-xs" estilo={{ borderColor: C.due }}>
+                Apagar todas as próximas cobranças
+              </BotaoConfirma>
             </div>
           )}
         </div>
@@ -3665,6 +3755,21 @@ function BotaoConfirma({ onConfirm, children, pergunta = "Tem certeza?", cor = C
 
 /* =========================================================== componentes */
 const Rotulo = ({ children }) => <div style={{ color: C.muted }} className="text-xs uppercase tracking-wider mb-2">{children}</div>;
+
+/** Campo de número inteiro que aceita apagar e redigitar sem travar num valor
+    mínimo. Um <input type="number"> controlado força de volta um valor a
+    cada tecla — aqui só valida ao sair do campo. */
+function CampoInteiro({ valor, onValor, min = 1, max = 99, style, className }) {
+  const [txt, setTxt] = useState(String(valor));
+  useEffect(() => { setTxt(String(valor)); }, [valor]);
+  return (
+    <input inputMode="numeric" value={txt}
+      onChange={(e) => setTxt(e.target.value.replace(/\D/g, "").slice(0, String(max).length))}
+      onFocus={(e) => e.target.select()}
+      onBlur={() => { const n = Math.min(max, Math.max(min, parseInt(txt, 10) || min)); setTxt(String(n)); onValor(n); }}
+      style={style} className={className} />
+  );
+}
 
 const Chip = ({ ativo, cor, children, onClick }) => (
   <button onClick={onClick} style={{ background: ativo ? cor : C.bg, color: ativo ? "#fff" : C.ink, borderColor: ativo ? cor : C.line }}
