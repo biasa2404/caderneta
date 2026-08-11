@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-10 22:53";
+const APP_BUILD = "2026-08-11 22:53";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -110,6 +110,10 @@ const AlertTriangle = ico(["m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h1
 const RotateCcw = ico(["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"]);
 const Lightbulb = ico(["M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5", "M9 18h6", "M10 22h4"]);
 const Pencil = ico(["M21.2 2.8a2.7 2.7 0 0 0-3.8 0l-11 11L5 19l4.2-1.4 11-11a2.7 2.7 0 0 0 0-3.8z"]);
+const Copy = icoMix([
+  ["rect", { width: 14, height: 14, x: 8, y: 8, rx: 2, ry: 2 }],
+  ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
+]);
 
 /* ------------------------------------------------------------ gráficos */
 /* rosca em SVG puro, sem biblioteca */
@@ -537,9 +541,26 @@ function seed() {
 
 /* ================================================= geração de recorrentes */
 function gerar(d, meses = 12) {
-  const out = [...d.lancamentos];
+  let out = [...d.lancamentos];
   const base = today();
   (d.recorrentes || []).forEach((r) => {
+    // Poda primeiro: a regra de fim pode ter mudado DEPOIS que essas cobranças
+    // já tinham sido geradas (o app sempre olha 12 meses à frente). Sem isso,
+    // definir uma data-fim não tira o que já existia além dela — a conta
+    // parece continuar para sempre. Só mexe no que ainda está pendente;
+    // o que já foi pago vira histórico e não se apaga sozinho.
+    if (r.fim?.tipo === "data" && r.fim.data) {
+      out = out.filter((l) => !(l.recId === r.id && l.status === "pendente" && l.vencimento > r.fim.data));
+    }
+    if (r.fim?.tipo === "vezes") {
+      const pagas = out.filter((l) => l.recId === r.id && l.status === "pago").length;
+      const cabem = Math.max(0, r.fim.vezes - pagas);
+      const pendentes = out.filter((l) => l.recId === r.id && l.status === "pendente")
+        .sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+      const manter = new Set(pendentes.slice(0, cabem).map((l) => l.id));
+      out = out.filter((l) => !(l.recId === r.id && l.status === "pendente" && !manter.has(l.id)));
+    }
+
     let feitas = out.filter((l) => l.recId === r.id).length;
     for (let i = 0; i < meses; i++) {
       const venc = addMonths(`${base.slice(0, 7)}-${String(r.dia).padStart(2, "0")}`, i);
@@ -691,55 +712,151 @@ function resumoDoMes(d, mes, catOf) {
     maior, subiu, caiu, gastoMedio: +gastoMedio.toFixed(2), guardado, folga };
 }
 
+/**
+ * Mesma ideia de resumoDoMes, mas para um período de um ou vários meses —
+ * usado no relatório exportável, onde você escolhe o intervalo. Compara
+ * sempre com o período anterior de mesmo tamanho, imediatamente antes.
+ */
+function resumoPeriodo(d, meses, catOf) {
+  const n = meses.length;
+  let k = meses[0], anteriores = [];
+  for (let i = 0; i < n; i++) { k = ym(addMonths(k + "-01", -1)); anteriores.unshift(k); }
+
+  const gastoPor = (ks) => {
+    const m = {};
+    for (const l of d.lancamentos || []) {
+      if (l.tipo !== "saida" || l.status !== "pago") continue;
+      if (ehAnulado(l) || ehAlheio(l)) continue;
+      if (!ks.includes(ym(l.pagamento || l.vencimento))) continue;
+      m[l.catId] = (m[l.catId] || 0) + emC(l.valor);
+    }
+    return m;
+  };
+  const entradasDe = (ks) => somaC((d.lancamentos || []).filter((l) =>
+    l.tipo === "entrada" && l.status === "pago" && ks.includes(ym(l.pagamento || l.vencimento))));
+
+  const atual = gastoPor(meses), antes = gastoPor(anteriores);
+  const ids = [...new Set([...Object.keys(atual), ...Object.keys(antes)])];
+  const comparacao = ids.map((id) => {
+    const a = (atual[id] || 0) / 100, b = (antes[id] || 0) / 100;
+    return { id, nome: catOf?.(id)?.nome || "—", cor: catOf?.(id)?.cor || "#727892",
+      atual: a, antes: b, delta: +(a - b).toFixed(2),
+      pct: b ? Math.round(((a - b) / b) * 100) : (a ? null : 0) };
+  }).sort((x, y) => y.atual - x.atual);
+
+  const saidas = comparacao.reduce((s, c) => s + c.atual, 0);
+  const entradas = entradasDe(meses);
+  const maior = comparacao[0] || null;
+  const subiu = comparacao.filter((c) => c.delta > 0).sort((a, b) => b.delta - a.delta)[0] || null;
+  const caiu = comparacao.filter((c) => c.delta < 0).sort((a, b) => a.delta - b.delta)[0] || null;
+
+  const gastoMedio = n ? saidas / n : 0;
+  const guardado = somaC((d.contas || []).filter((c) => c.tipo === "caixinha"), (c) => saldoDaConta(d, c.id));
+  const folga = gastoMedio > 0 ? +(guardado / gastoMedio).toFixed(1) : null;
+
+  return { meses, anteriores, saidas, entradas, sobra: +(entradas - saidas).toFixed(2),
+    comparacao, maior, subiu, caiu, gastoMedio: +gastoMedio.toFixed(2), guardado, folga };
+}
+
 /* ============================================================ relatório */
 /* Monta um documento independente com o resumo do mês. Serve para imprimir,
    salvar em PDF ou guardar como arquivo — inclusive onde o navegador não
    oferece impressão, como o app instalado no iPhone. */
 
-function relatorioHTML({ mes, resumo, comparacao, linhaTempo, categorias, contas, panorama }) {
+function relatorioHTML({ rotulo, resumo, linhaTempo, contas, panorama, secoes }) {
   const esc = (t) => String(t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const linha = (rot, val, cor) =>
     `<tr><td>${esc(rot)}</td><td class="n"${cor ? ` style="color:${cor}"` : ""}>${esc(brl(val))}</td></tr>`;
 
-  const evolucao = linhaTempo.length >= 2
+  /* rosca de gasto por categoria, em SVG estático — sem depender de nenhuma
+     biblioteca, só matemática de círculo. Funciona em qualquer visualizador. */
+  const roscaSVG = (fatias, tamanho = 200) => {
+    const total = fatias.reduce((s, f) => s + f.valor, 0) || 1;
+    const cx = tamanho / 2, cy = tamanho / 2, ext = tamanho * 0.42, into = tamanho * 0.25;
+    let ang = -Math.PI / 2;
+    const caminhos = fatias.map((f) => {
+      const frac = f.valor / total;
+      const ini = ang, fimA = ang + frac * Math.PI * 2 - (fatias.length > 1 ? 0.015 : 0);
+      ang += frac * Math.PI * 2;
+      const p1 = [cx + ext * Math.cos(ini), cy + ext * Math.sin(ini)];
+      const p2 = [cx + ext * Math.cos(fimA), cy + ext * Math.sin(fimA)];
+      const p3 = [cx + into * Math.cos(fimA), cy + into * Math.sin(fimA)];
+      const p4 = [cx + into * Math.cos(ini), cy + into * Math.sin(ini)];
+      const grande = fimA - ini > Math.PI ? 1 : 0;
+      return `<path d="M${p1[0].toFixed(1)} ${p1[1].toFixed(1)} A${ext} ${ext} 0 ${grande} 1 ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}
+        L${p3[0].toFixed(1)} ${p3[1].toFixed(1)} A${into} ${into} 0 ${grande} 0 ${p4[0].toFixed(1)} ${p4[1].toFixed(1)} Z" fill="${f.cor}"><title>${esc(f.nome)}: ${esc(brl(f.valor))}</title></path>`;
+    }).join("");
+    return `<svg viewBox="0 0 ${tamanho} ${tamanho}" width="180" height="180">${caminhos}</svg>`;
+  };
+
+  const secGrafico = secoes.grafico && resumo.comparacao.some((c) => c.atual > 0)
+    ? (() => {
+        // roscaSVG espera "valor", não "atual" — os dados de comparação
+        // usam "atual" para o valor do período escolhido
+        const fatias = resumo.comparacao.filter((c) => c.atual > 0)
+          .map((c) => ({ nome: c.nome, cor: c.cor, valor: c.atual }));
+        const legenda = fatias.map((f) =>
+          `<div class="leg-item"><span class="dot" style="background:${f.cor}"></span>${esc(f.nome)}
+           <b>${esc(brl(f.valor))}</b></div>`).join("");
+        return `<h2>Para onde foi o dinheiro</h2>
+          <div class="grafico-cat">${roscaSVG(fatias)}<div class="legenda">${legenda}</div></div>`;
+      })() : "";
+
+  const secResumo = secoes.resumo ? (() => {
+    const obs = [
+      resumo.maior && `O que mais pesou foi ${resumo.maior.nome}, com ${brl(resumo.maior.atual)}.`,
+      resumo.subiu && resumo.subiu.delta > 0 &&
+        `${resumo.subiu.nome} subiu ${brl(resumo.subiu.delta)}${resumo.subiu.pct != null ? ` (${resumo.subiu.pct}%)` : ""} em relação ao período anterior.`,
+      resumo.caiu && resumo.caiu.delta < 0 &&
+        `${resumo.caiu.nome} caiu ${brl(-resumo.caiu.delta)}${resumo.caiu.pct != null ? ` (${Math.abs(resumo.caiu.pct)}%)` : ""}.`,
+      resumo.folga != null &&
+        `Com o que está guardado, você cobre ${resumo.folga} ${resumo.folga === 1 ? "mês" : "meses"} no seu ritmo de gasto (${brl(resumo.gastoMedio)} por mês, em média).`,
+    ].filter(Boolean);
+    return `<div class="cartoes">
+      <div class="cartao"><div class="r">Entrou</div><div class="v" style="color:#0E7C61">${esc(brl(resumo.entradas))}</div></div>
+      <div class="cartao"><div class="r">Saiu</div><div class="v" style="color:#C42B5C">${esc(brl(resumo.saidas))}</div></div>
+      <div class="cartao"><div class="r">${resumo.sobra >= 0 ? "Sobrou" : "Faltou"}</div>
+        <div class="v" style="color:${resumo.sobra >= 0 ? "#3B3FA8" : "#C42B5C"}">${esc(brl(Math.abs(resumo.sobra)))}</div></div>
+    </div>${obs.length ? `<ul>${obs.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}`;
+  })() : "";
+
+  const secPanorama = secoes.panorama ? `<h2>Onde seu dinheiro está</h2>
+    <table><tbody>
+    ${linha("Em conta e espécie", panorama.totalBancos + panorama.totalFisico)}
+    ${linha("Guardado", panorama.totalGuardado, "#3B3FA8")}
+    ${linha("Investido", panorama.totalInvestido, "#8A3FBF")}
+    ${linha("Comprometido do mês", panorama.comprometidoMes, "#B26A00")}
+    ${linha("Disponível", panorama.disponivel, panorama.disponivel < 0 ? "#C42B5C" : "#0E7C61")}
+    </tbody></table>` : "";
+
+  const secComparacao = secoes.comparacao && resumo.comparacao.length
+    ? `<h2>Este período contra o anterior</h2>
+       <table><thead><tr><th>Categoria</th><th class="n">Antes</th><th class="n">Agora</th><th class="n">Diferença</th></tr></thead><tbody>` +
+      resumo.comparacao.map((c) => `<tr><td>${esc(c.nome)}</td><td class="n">${esc(brl(c.antes))}</td>
+        <td class="n">${esc(brl(c.atual))}</td>
+        <td class="n" style="color:${c.delta > 0 ? "#C42B5C" : c.delta < 0 ? "#0E7C61" : "#727892"}">
+        ${c.delta === 0 ? "—" : esc((c.delta > 0 ? "+" : "") + brl(c.delta))}</td></tr>`).join("") +
+      `</tbody></table>` : "";
+
+  const secMetas = secoes.metas && contas.filter((c) => c.meta > 0).length
+    ? `<h2>Metas</h2><table><thead><tr><th>Caixinha</th><th class="n">Tem</th><th class="n">Meta</th>
+       <th class="n">Falta</th><th>Previsão</th></tr></thead><tbody>` +
+      contas.filter((c) => c.meta > 0).map((c) => `<tr><td>${esc(c.nome)}${c.objetivo ? ` <span class="s">${esc(c.objetivo)}</span>` : ""}</td>
+        <td class="n">${esc(brl(c.tem))}</td><td class="n">${esc(brl(c.meta))}</td>
+        <td class="n">${esc(brl(c.faltam))}</td>
+        <td>${c.previsao === "pronto" ? "alcançada" : c.previsao ? esc(mesLabel(c.previsao)) : "—"}</td></tr>`).join("") +
+      `</tbody></table>` : "";
+
+  const secEvolucao = secoes.evolucao && linhaTempo.length >= 2
     ? `<h2>Como seu dinheiro cresceu</h2><table><thead><tr><th>Mês</th><th class="n">Em conta</th>
        <th class="n">Guardado</th><th class="n">Investido</th><th class="n">Total</th></tr></thead><tbody>` +
       linhaTempo.map((p) => `<tr><td>${esc(mesLabel(p.mes))}</td><td class="n">${esc(brl(p.liquido))}</td>
         <td class="n">${esc(brl(p.guardado))}</td><td class="n">${esc(brl(p.investido))}</td>
         <td class="n"><b>${esc(brl(p.total))}</b></td></tr>`).join("") + `</tbody></table>` : "";
 
-  const comp = comparacao.length
-    ? `<h2>${esc(mesLabel(mes))} contra ${esc(mesLabel(resumo.anterior))}</h2>
-       <table><thead><tr><th>Categoria</th><th class="n">Antes</th><th class="n">Agora</th><th class="n">Diferença</th></tr></thead><tbody>` +
-      comparacao.map((c) => `<tr><td>${esc(c.nome)}</td><td class="n">${esc(brl(c.antes))}</td>
-        <td class="n">${esc(brl(c.atual))}</td>
-        <td class="n" style="color:${c.delta > 0 ? "#C42B5C" : c.delta < 0 ? "#0E7C61" : "#727892"}">
-        ${c.delta === 0 ? "—" : esc((c.delta > 0 ? "+" : "") + brl(c.delta))}</td></tr>`).join("") +
-      `</tbody></table>` : "";
-
-  const metas = contas.filter((c) => c.meta > 0);
-  const secMetas = metas.length
-    ? `<h2>Metas</h2><table><thead><tr><th>Caixinha</th><th class="n">Tem</th><th class="n">Meta</th>
-       <th class="n">Falta</th><th>Previsão</th></tr></thead><tbody>` +
-      metas.map((c) => `<tr><td>${esc(c.nome)}${c.objetivo ? ` <span class="s">${esc(c.objetivo)}</span>` : ""}</td>
-        <td class="n">${esc(brl(c.tem))}</td><td class="n">${esc(brl(c.meta))}</td>
-        <td class="n">${esc(brl(c.faltam))}</td>
-        <td>${c.previsao === "pronto" ? "alcançada" : c.previsao ? esc(mesLabel(c.previsao)) : "—"}</td></tr>`).join("") +
-      `</tbody></table>` : "";
-
-  const obs = [
-    resumo.maior && `O que mais pesou foi ${resumo.maior.nome}, com ${brl(resumo.maior.atual)}.`,
-    resumo.subiu && resumo.subiu.delta > 0 &&
-      `${resumo.subiu.nome} subiu ${brl(resumo.subiu.delta)}${resumo.subiu.pct != null ? ` (${resumo.subiu.pct}%)` : ""}.`,
-    resumo.caiu && resumo.caiu.delta < 0 &&
-      `${resumo.caiu.nome} caiu ${brl(-resumo.caiu.delta)}${resumo.caiu.pct != null ? ` (${Math.abs(resumo.caiu.pct)}%)` : ""}.`,
-    resumo.folga != null &&
-      `Com o que está guardado, você cobre ${resumo.folga} ${resumo.folga === 1 ? "mês" : "meses"} no seu ritmo de gasto (${brl(resumo.gastoMedio)} por mês).`,
-  ].filter(Boolean);
-
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>caderneta — ${esc(mesLabel(mes))}</title>
+<title>caderneta — ${esc(rotulo)}</title>
 <style>
   :root { color-scheme: light; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
@@ -760,6 +877,11 @@ function relatorioHTML({ mes, resumo, comparacao, linhaTempo, categorias, contas
   td { padding: 7px 8px; border-bottom: 1px solid #EDEFF5; }
   .n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .s { color: #727892; font-size: 11px; }
+  .grafico-cat { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .legenda { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+  .leg-item { display: flex; align-items: center; gap: 6px; }
+  .leg-item b { margin-left: auto; padding-left: 14px; font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .rodape { margin-top: 34px; color: #9AA0B4; font-size: 11px; border-top: 1px solid #EDEFF5; padding-top: 10px; }
   .barra { position: fixed; left: 0; right: 0; bottom: 0; background: #141824; color: #fff;
            padding: 12px 16px; display: flex; gap: 10px; justify-content: center; font-size: 14px; }
@@ -768,35 +890,21 @@ function relatorioHTML({ mes, resumo, comparacao, linhaTempo, categorias, contas
   @media print {
     body { padding: 0; }
     .barra { display: none; }
-    table, .cartoes { break-inside: avoid; }
+    table, .cartoes, .grafico-cat { break-inside: avoid; }
     @page { margin: 15mm; size: A4 portrait; }
     * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
 </style></head><body><div class="folha">
 
 <h1>caderneta</h1>
-<p class="sub">${esc(mesLabel(mes))} · gerado em ${esc(new Date().toLocaleDateString("pt-BR"))}</p>
+<p class="sub">${esc(rotulo)} · gerado em ${esc(new Date().toLocaleDateString("pt-BR"))}</p>
 
-<div class="cartoes">
-  <div class="cartao"><div class="r">Entrou</div><div class="v" style="color:#0E7C61">${esc(brl(resumo.entradas))}</div></div>
-  <div class="cartao"><div class="r">Saiu</div><div class="v" style="color:#C42B5C">${esc(brl(resumo.saidas))}</div></div>
-  <div class="cartao"><div class="r">${resumo.sobra >= 0 ? "Sobrou" : "Faltou"}</div>
-    <div class="v" style="color:${resumo.sobra >= 0 ? "#3B3FA8" : "#C42B5C"}">${esc(brl(Math.abs(resumo.sobra)))}</div></div>
-</div>
-${obs.length ? `<ul>${obs.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}
-
-<h2>Onde seu dinheiro está</h2>
-<table><tbody>
-${linha("Em conta e espécie", panorama.totalBancos + panorama.totalFisico)}
-${linha("Guardado", panorama.totalGuardado, "#3B3FA8")}
-${linha("Investido", panorama.totalInvestido, "#8A3FBF")}
-${linha("Comprometido do mês", panorama.comprometidoMes, "#B26A00")}
-${linha("Disponível", panorama.disponivel, panorama.disponivel < 0 ? "#C42B5C" : "#0E7C61")}
-</tbody></table>
-
-${comp}
+${secResumo}
+${secGrafico}
+${secPanorama}
+${secComparacao}
 ${secMetas}
-${evolucao}
+${secEvolucao}
 
 <p class="rodape">Relatório gerado pela sua caderneta. Os valores refletem os lançamentos marcados como pagos ou recebidos.</p>
 </div>
@@ -852,16 +960,17 @@ const MIGRACOES = {
 /** Conserta o que estiver faltando ou fora do tipo, sem perder informação. */
 function sanear(d) {
   const num2 = (v) => (Number.isFinite(+v) ? Math.round(+v * 100) / 100 : 0);
+  const num2pos = (v) => Math.max(0, num2(v));   // orçamento e meta negativos quebram a barra de progresso em silêncio
   // descarta buracos antes de qualquer coisa: um item nulo derrubaria o resto
   const lista = (x) => (Array.isArray(x) ? x.filter((r) => r && typeof r === "object") : []);
 
   const s = {
     ...d,
-    contas: lista(d.contas).map((c) => ({ ...c, saldoInicial: num2(c.saldoInicial) })),
+    contas: lista(d.contas).map((c) => ({ ...c, saldoInicial: num2(c.saldoInicial), meta: num2pos(c.meta) })),
     cartoes: lista(d.cartoes).map((c) => ({ ...c, dono: c.dono || "eu",
       fecha: Math.min(28, Math.max(1, +c.fecha || 1)),
       vence: Math.min(28, Math.max(1, +c.vence || 1)) })),
-    categorias: lista(d.categorias).map((c) => ({ ...c, orcamento: num2(c.orcamento), subs: lista(c.subs) })),
+    categorias: lista(d.categorias).map((c) => ({ ...c, orcamento: num2pos(c.orcamento), subs: lista(c.subs) })),
     recorrentes: lista(d.recorrentes).map((r) => ({ ...r, valor: num2(r.valor),
       dia: Math.min(28, Math.max(1, +r.dia || 1)), fim: r.fim || { tipo: "nunca" } })),
     intencoes: lista(d.intencoes).map((i) => ({ ...i, valor: num2(i.valor) })),
@@ -1063,6 +1172,7 @@ function Aplicacao() {
   const [conta, setConta] = useState(null);      // id da caixinha aberta
   const [lancando, setLancando] = useState(false);   // painel do botão flutuante
   const [detalheSync, setDetalheSync] = useState(false);
+  const [compartilhando, setCompartilhando] = useState(null);   // { quem, texto } | null
   const timer = useRef(null);
   const retry = useRef(null);
   const tentativa = useRef(0);
@@ -1311,7 +1421,30 @@ function Aplicacao() {
   /** Cria uma conta fixa a partir do formulário de lançar, sem passar por Ajustes. */
   const criarRecorrente = (rec) => setD({ ...d, recorrentes: [...d.recorrentes, rec] });
 
-  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, flash,
+  /** Copia um lançamento para um novo, solto de parcelas ou recorrência,
+      pendente e pronto para você mudar a data. Devolve o novo id, para o
+      chamador poder abrir a cópia direto. */
+  const duplicarLancamento = (l) => {
+    const { id, grupo, parcela, parcelas, recId, src, criadoEm, editadoEm, ...resto } = l;
+    const novoId = uid();
+    // se o original já tinha sido acertado (reembolso ou gasto de terceiro),
+    // a cópia é uma dívida nova — ninguém pagou por ela ainda
+    const reembolso = resto.reembolso === "recebido" ? (resto.deQuem ? "aguardando" : "nao") : resto.reembolso;
+    setD({ ...d, lancamentos: [{ ...resto, id: novoId, status: "pendente", pagamento: null, reembolso, criadoEm: new Date().toISOString() }, ...d.lancamentos] });
+    flash(`"${l.nome}" duplicado`);
+    return novoId;
+  };
+
+  /** Muda o valor de uma conta fixa vale, por padrão, só para os meses ainda
+      não gerados. Isto aqui é o caminho explícito para quem também quer
+      corrigir o que já está pendente — nunca acontece sozinho. */
+  const atualizarValorPendentes = (recId, novoValor) => {
+    const alvo = d.lancamentos.filter((l) => l.recId === recId && l.status === "pendente");
+    if (!alvo.length) { flash("Não há cobranças pendentes desta conta fixa"); return; }
+    comDesfazer(`${alvo.length} cobrança(s) atualizadas para ${brl(novoValor)}`, () => upVarios(alvo, { valor: novoValor }));
+  };
+
+  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M };
 
@@ -1380,6 +1513,11 @@ function Aplicacao() {
         <DetalheSync sync={sync} onClose={() => setDetalheSync(false)}
           onTestar={() => { sincronizar(d); setDetalheSync(false); }}
           onConferirTudo={() => { setD({ ...d, ateOnde: 0 }); setDetalheSync(false); flash("Conferindo tudo com a planilha…"); }} />
+      )}
+
+      {compartilhando && (
+        <CompartilharTexto quem={compartilhando.quem} texto={compartilhando.texto}
+          onClose={() => setCompartilhando(null)} flash={flash} />
       )}
 
       {toast && (
@@ -1471,6 +1609,44 @@ function SyncBadge({ sync, onAbrir }) {
 
 /** Painel com o texto completo do erro e o que fazer a respeito.
     Existe porque no celular não há como "passar o mouse" sobre nada. */
+/** Último recurso para "enviar lista": mostra o texto num campo selecionável
+    dentro do próprio app. Existe porque window.prompt() é da mesma família
+    frágil do confirm() — em apps instalados na tela inicial do iPhone, essas
+    caixas nativas costumam simplesmente não aparecer. Aqui a seleção de
+    texto é feita pelo próprio sistema operacional, não por uma API que pode
+    estar bloqueada. */
+function CompartilharTexto({ quem, texto, onClose, flash }) {
+  const [copiado, setCopiado] = useState(false);
+  const areaRef = useRef(null);
+
+  const copiar = async () => {
+    try { await navigator.clipboard.writeText(texto); setCopiado(true); flash("Copiado"); return; }
+    catch (e) { /* API moderna indisponível ou sem permissão: tenta a antiga */ }
+    areaRef.current?.select();
+    try {
+      if (document.execCommand("copy")) { setCopiado(true); flash("Copiado"); return; }
+    } catch (e) { /* também falhou: o campo já está selecionado, é só colar na mão */ }
+    flash("Selecione o texto abaixo e copie");
+  };
+
+  return (
+    <Painel titulo={`Enviar para ${quem}`} onClose={onClose}
+      rodape={
+        <button onClick={copiar} style={{ background: copiado ? C.in : C.ink }}
+          className="w-full rounded-xl py-2.5 text-sm text-white font-medium transition-colors">
+          {copiado ? "Copiado ✓" : "Copiar"}
+        </button>
+      }>
+      <p style={{ color: C.muted }} className="text-sm mb-3">
+        Toque no texto, selecione tudo e copie — depois cole no WhatsApp ou onde quiser mandar.
+      </p>
+      <textarea ref={areaRef} readOnly value={texto} rows={8} onFocus={(e) => e.target.select()}
+        style={{ background: C.surface, borderColor: C.line, color: C.ink, fontFamily: MONO }}
+        className="w-full rounded-xl border p-3 text-sm outline-none resize-none" />
+    </Painel>
+  );
+}
+
 function DetalheSync({ sync, onClose, onTestar, onConferirTudo }) {
   const e = ESTADOS[sync?.estado] || ESTADOS.local;
   const quando = sync?.quando
@@ -1689,6 +1865,7 @@ function formInicial(ref) {
     catId: ref.catPadrao("saida"), subId: null,
     forma: "Pix", instr: ref.primeiraConta, destino: ref.primeiroDestino,
     venc: ref.hoje, parcelas: "1", obs: "", reemb: false, deQuem: "", repetir: false,
+    fimRepeticao: { tipo: "nunca" },
     tocados: {},        // campos que você mexeu na mão
     sugestao: null,     // de onde veio o preenchimento automático
   };
@@ -1716,7 +1893,8 @@ function reduzForm(e, a) {
         instr: t === "saida" && e.forma === "Crédito" ? e.instr : ref.primeiraConta,
         deQuem: t === "saida" ? e.deQuem : "",
         reemb: t === "saida" ? e.reemb : false,
-        repetir: t === "saida" ? e.repetir : false };
+        repetir: t === "saida" ? e.repetir : false,
+        fimRepeticao: t === "saida" ? e.fimRepeticao : { tipo: "nunca" } };
     }
 
     case "trocarForma": {
@@ -1763,7 +1941,12 @@ function reduzForm(e, a) {
        representam ideias diferentes (uma dívida dividida vs. uma conta que
        volta todo mês), então uma desliga a outra. */
     case "repetir":
-      return { ...e, repetir: a.valor, parcelas: a.valor ? "1" : e.parcelas };
+      return { ...e, repetir: a.valor, parcelas: a.valor ? "1" : e.parcelas,
+        fimRepeticao: a.valor ? e.fimRepeticao : { tipo: "nunca" } };
+
+    /* muda entre "sem fim", "até uma data" e "depois de X vezes" */
+    case "fimRepeticao":
+      return { ...e, fimRepeticao: a.valor };
 
     case "limpar":
       // mantém o tipo escolhido, mas a categoria tem que ser a padrão DESSE tipo
@@ -1800,7 +1983,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
 
   /* nomes curtos para o que a tela usa o tempo todo */
   const { tipo, pago, cents, nome, catId, subId, forma, instr, destino,
-    venc, parcelas, obs, reemb, deQuem, sugestao, repetir } = f;
+    venc, parcelas, obs, reemb, deQuem, sugestao, repetir, fimRepeticao } = f;
   const nParc = Math.min(48, Math.max(1, parseInt(parcelas, 10) || 1));
   const v = cents / 100;
   const credito = forma === "Crédito";
@@ -1823,6 +2006,8 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
   const enviar = () => {
     if (v <= 0) { flash("Digite um valor maior que zero"); return; }
     if (forma === "Crédito" && !d.cartoes.length) { flash("Cadastre um cartão em Ajustes primeiro"); return; }
+    if (tipo !== "transferencia" && !instr) { flash("Cadastre uma conta em Ajustes → Contas primeiro"); return; }
+    if (tipo === "transferencia" && (!instr || !destino)) { flash("Cadastre pelo menos duas contas em Ajustes → Contas primeiro"); return; }
     if (tipo === "transferencia" && instr === destino) { flash("Escolha contas diferentes"); return; }
     const base = {
       tipo, nome: nome || (tipo === "transferencia" ? "Transferência" : catOf(catId).nome), valor: v,
@@ -1845,7 +2030,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
       criarRecorrente({ id: recId, nome: comConta.nome, valor: v, dia,
         catId: comConta.catId, subId: comConta.subId, forma: comConta.forma,
         contaId: comConta.contaId || undefined, cartaoId: comConta.cartaoId || undefined,
-        variavel: false, fim: { tipo: "nunca" } });
+        variavel: false, fim: fimRepeticao });
       salvar({ ...comConta, recId, src: `${recId}#${ym(venc)}` });
       flash("Virou uma conta fixa");
     } else {
@@ -1967,29 +2152,58 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
             <div><Rotulo>{tipo === "entrada" ? "Data prevista" : "Vencimento"}</Rotulo>
               <input type="date" value={venc} onChange={(e) => campo("venc", e.target.value)} style={{ background: C.bg, borderColor: C.line }}
                 className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
-            {tipo === "saida" && (
-              <div>
-                <Rotulo>{repetir ? "Repete todo mês" : "Parcelas"}</Rotulo>
-                {repetir ? (
+            {tipo === "saida" && !repetir && (
+              <div><Rotulo>Parcelas</Rotulo>
+                <input inputMode="numeric" value={parcelas}
+                  onChange={(e) => campo("parcelas", e.target.value.replace(/\D/g, "").slice(0, 2))}
+                  onFocus={(e) => e.target.select()}
+                  onBlur={() => campo("parcelas", String(nParc))}
+                  style={{ background: C.bg, borderColor: C.line, color: C.ink, fontFamily: MONO }} className="w-full rounded-xl border px-3 py-2 outline-none" />
+                {nParc > 1 && <p style={{ color: C.muted, fontFamily: MONO }} className="text-xs mt-1">{nParc}× {brl(v / nParc)}</p>}
+                <button onClick={() => dispara({ tipo: "repetir", valor: true })} style={{ color: C.saved }}
+                  className="text-xs underline underline-offset-2 mt-1">
+                  é uma conta fixa? repete todo mês
+                </button>
+              </div>
+            )}
+            {tipo === "saida" && repetir && (
+              <div className="flex items-end">
+                <div style={{ background: C.saved + "14", color: C.saved }}
+                  className="w-full rounded-xl px-3 py-2 text-sm font-medium flex items-center gap-1.5">
+                  <Repeat size={14} className="shrink-0" /> Virou conta fixa
+                </div>
+              </div>
+            )}
+
+            {tipo === "saida" && repetir && (
+              <div className="sm:col-span-2 rounded-xl border p-3"
+                style={{ background: C.saved + "0F", borderColor: C.saved + "40" }}>
+                <div className="flex items-center justify-between mb-3">
+                  <span style={{ color: C.saved }} className="text-xs font-medium">Até quando se repete</span>
                   <button onClick={() => dispara({ tipo: "repetir", valor: false })}
-                    style={{ background: C.tr, color: "#fff" }}
-                    className="w-full rounded-xl py-2 text-sm font-medium flex items-center justify-center gap-1.5">
-                    <Repeat size={14} /> vira conta fixa · toque para desligar
+                    style={{ color: C.muted }} className="text-xs underline underline-offset-2">
+                    não é conta fixa, desfazer
                   </button>
-                ) : (
-                  <input inputMode="numeric" value={parcelas}
-                    onChange={(e) => campo("parcelas", e.target.value.replace(/\D/g, "").slice(0, 2))}
-                    onFocus={(e) => e.target.select()}
-                    onBlur={() => campo("parcelas", String(nParc))}
-                    style={{ background: C.bg, borderColor: C.line, color: C.ink, fontFamily: MONO }} className="w-full rounded-xl border px-3 py-2 outline-none" />
-                )}
-                {!repetir && nParc > 1 && <p style={{ color: C.muted, fontFamily: MONO }} className="text-xs mt-1">{nParc}× {brl(v / nParc)}</p>}
-                {!repetir && nParc === 1 && (
-                  <button onClick={() => dispara({ tipo: "repetir", valor: true })} style={{ color: C.tr }}
-                    className="text-xs underline underline-offset-2 mt-1">
-                    é uma conta fixa? repete todo mês
-                  </button>
-                )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[["nunca", "Sem fim"], ["data", "Até uma data"], ["vezes", "Nº de vezes"]].map(([k, t]) => (
+                    <Chip key={k} ativo={fimRepeticao.tipo === k} cor={C.saved}
+                      onClick={() => dispara({ tipo: "fimRepeticao", valor:
+                        k === "nunca" ? { tipo: "nunca" }
+                        : k === "data" ? { tipo: "data", data: fimRepeticao.data || "" }
+                        : { tipo: "vezes", vezes: fimRepeticao.vezes || 12 } })}>{t}</Chip>
+                  ))}
+                  {fimRepeticao.tipo === "data" && (
+                    <input type="date" value={fimRepeticao.data || ""}
+                      onChange={(e) => dispara({ tipo: "fimRepeticao", valor: { tipo: "data", data: e.target.value } })}
+                      style={{ background: C.bg, borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs outline-none" />
+                  )}
+                  {fimRepeticao.tipo === "vezes" && (
+                    <CampoInteiro valor={fimRepeticao.vezes || 12}
+                      onValor={(n) => dispara({ tipo: "fimRepeticao", valor: { tipo: "vezes", vezes: n } })} min={1} max={99}
+                      style={{ background: C.bg, borderColor: C.line }} className="w-16 rounded-lg border px-2 py-1 text-xs outline-none" />
+                  )}
+                </div>
               </div>
             )}
             <div className="sm:col-span-2"><Rotulo>Observações</Rotulo>
@@ -2019,7 +2233,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
         )}
 
         <button onClick={enviar} disabled={v <= 0} style={{ background: v > 0 ? C.ink : C.line, color: v > 0 ? "#fff" : C.muted }}
-          className="w-full py-3 rounded-xl font-medium text-sm">Salvar lançamento</button>
+          className="w-full py-3 rounded-xl font-medium text-sm transition-transform active:scale-[0.98]">Salvar lançamento</button>
       </section>
   );
 }
@@ -2218,7 +2432,27 @@ function Evolucao({ dados, series, altura = 200 }) {
 }
 
 /* ================================================================= agora */
-function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subOf, contaOf, cartaoOf, pagar, pagarVarios, up, upVarios, flash, anulado, alheio, aCobrar, abrir, verLista, verConta, comDesfazer }) {
+function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subOf, contaOf, cartaoOf, pagar, pagarVarios, up, upVarios, flash, anulado, alheio, aCobrar, abrir, verLista, verConta, comDesfazer, abrirCompartilhar }) {
+  /**
+   * Manda a lista de cobrança para outra pessoa. Tenta na ordem:
+   * 1. Menu nativo de compartilhar (leva direto ao WhatsApp) — o melhor caminho no celular.
+   * 2. Área de transferência, se o compartilhar não existir no aparelho.
+   * 3. Uma caixa de texto para copiar na mão, se as duas de cima falharem.
+   * Cada etapa só avisa sucesso depois de confirmar que funcionou de verdade —
+   * antes, o "copiado" aparecia sempre, mesmo quando a cópia falhava em silêncio.
+   */
+  const compartilharCobranca = async (quem, texto) => {
+    if (navigator.share) {
+      try { await navigator.share({ title: `Cobrança de ${quem}`, text: texto }); return; }
+      catch (e) { if (e.name === "AbortError") return; /* você cancelou o menu: tudo bem, não é erro */ }
+    }
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(texto); flash("Lista copiada"); return; }
+      catch (e) { /* alguns aparelhos negam a permissão: cai para o último recurso */ }
+    }
+    abrirCompartilhar(quem, texto);   // painel dentro do app: nunca depende de diálogo nativo
+  };
+
   const doMes = pendentes.filter((l) => ym(l.vencimento) <= M).sort((a, b) => a.vencimento.localeCompare(b.vencimento));
   const aReceber = d.lancamentos.filter((l) => l.status === "pendente" && l.tipo === "entrada").sort((a, b) => a.vencimento.localeCompare(b.vencimento));
   const hoje = today();
@@ -2337,9 +2571,9 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
                   ))}
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => { navigator.clipboard?.writeText(
-                    `${ls.map((l) => `${l.nome} — ${brl(l.valor)}`).join("\n")}\nTotal: ${brl(soma(ls))}`); flash("Lista copiada"); }}
-                    style={{ borderColor: C.line }} className="flex-1 rounded-lg border py-1.5 text-xs">Copiar lista</button>
+                  <button onClick={() => compartilharCobranca(quem,
+                      `${ls.map((l) => `${l.nome} — ${brl(l.valor)}`).join("\n")}\nTotal: ${brl(soma(ls))}`)}
+                    style={{ borderColor: C.line }} className="flex-1 rounded-lg border py-1.5 text-xs">Enviar lista</button>
                   <button onClick={() => comDesfazer(`${quem} acertou ${brl(soma(ls))}`, () => upVarios(ls, { reembolso: "recebido" }))}
                     style={{ background: C.tr }} className="flex-1 rounded-lg py-1.5 text-xs text-white">{quem} me pagou</button>
                 </div>
@@ -2371,7 +2605,7 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
 }
 
 /* ================================================================ futuro */
-function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir }) {
+function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir, verLista }) {
   const [janela, setJanela] = useState(12);
   const [de, setDe] = useState("");
   const [ate, setAte] = useState("");
@@ -2435,6 +2669,21 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       </div>
 
       {meses.length === 0 && <Vazio>Nenhum compromisso nesse intervalo.</Vazio>}
+      {meses.length > 1 && (
+        <div className="mb-4">
+          <GraficoMeses
+            dados={meses.map(([k, ls]) => ({
+              chave: k, rot: mesCurto(k),
+              valor: ls.filter((l) => l.status === "pendente").reduce((s, l) => s + emC(l.valor), 0) / 100,
+            }))}
+            cor={C.due}
+            onColuna={(m) => verLista({
+              titulo: mesLabel(m.chave), sub: "Comprometido neste mês",
+              itens: (meses.find(([k]) => k === m.chave)?.[1] || []),
+            })}
+          />
+        </div>
+      )}
       {meses.length > 1 && (
         <div className="flex justify-end mb-2">
           <button onClick={() => setRecolhidos(todosAbertos ? chaves : [])}
@@ -2515,12 +2764,16 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
 function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, totalInvestido, flash, verConta }) {
   const [mov, setMov] = useState(null);
   const [v, setV] = useState("");
-  const [origem, setOrigem] = useState("nubank");
+  const [origem, setOrigem] = useState(null);
   const liquidas = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
+  // se nada foi escolhido ainda, ou a escolha de antes não existe mais
+  // (conta apagada), cai para a primeira conta líquida disponível
+  const origemEfetiva = liquidas.some((c) => c.id === origem) ? origem : liquidas[0]?.id;
 
   const transferir = (destinoId, sentido) => {
     const n = num(v); if (n <= 0) return;
-    const de = sentido > 0 ? origem : destinoId, para = sentido > 0 ? destinoId : origem;
+    if (!origemEfetiva) { flash("Cadastre uma conta de banco ou espécie primeiro"); return; }
+    const de = sentido > 0 ? origemEfetiva : destinoId, para = sentido > 0 ? destinoId : origemEfetiva;
     setD({ ...d, lancamentos: [{ id: uid(), tipo: "transferencia", nome: sentido > 0 ? "Guardei" : "Retirei",
       valor: n, forma: "Pix", contaId: de, destinoId: para, vencimento: today(), pagamento: today(),
       status: "pago", obs: "", reembolso: "nao" }, ...d.lancamentos] });
@@ -2585,7 +2838,7 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
             {mov === c.id && (
               <div className="mt-3">
                 <div className="flex flex-wrap gap-2 mb-2">
-                  {liquidas.map((o) => <Chip key={o.id} ativo={origem === o.id} cor={C.tr} onClick={() => setOrigem(o.id)}>{o.nome}</Chip>)}
+                  {liquidas.map((o) => <Chip key={o.id} ativo={origemEfetiva === o.id} cor={C.tr} onClick={() => setOrigem(o.id)}>{o.nome}</Chip>)}
                 </div>
                 <div className="flex gap-2">
                   <input value={v} onChange={(e) => setV(e.target.value)} inputMode="decimal" placeholder="0,00"
@@ -2608,6 +2861,89 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
 }
 
 /* =========================================================== relatórios */
+
+/** Painel que abre ao tocar em "Relatório": escolhe o período do PDF e quais
+    seções entram nele — o mesmo relatório nunca serve todo mundo igual. */
+function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
+  const [janela, setJanela] = useState(periodoInicial.janela);
+  const [de, setDe] = useState(periodoInicial.de);
+  const [ate, setAte] = useState(periodoInicial.ate);
+  const [secoes, setSecoes] = useState({
+    resumo: true, grafico: true, panorama: true, comparacao: true, metas: true, evolucao: true,
+  });
+
+  const periodo = useMemo(() => {
+    if (de && ate && de <= ate) {
+      const ms = []; let k = de + "-01";
+      while (ym(k) <= ate) { ms.push(ym(k)); k = addMonths(k, 1); }
+      return ms;
+    }
+    return Array.from({ length: janela }, (_, i) => ym(addMonths(today(), -(janela - 1 - i))));
+  }, [janela, de, ate]);
+
+  const rotulo = periodo.length === 1 ? mesLabel(periodo[0]) : `${mesLabel(periodo[0])} — ${mesLabel(periodo[periodo.length - 1])}`;
+  const nenhumaSecao = !Object.values(secoes).some(Boolean);
+
+  const OPCOES = [
+    ["resumo", "Resumo do período", "Quanto entrou, saiu e sobrou, com observações automáticas"],
+    ["grafico", "Gráfico por categoria", "Rosca mostrando para onde foi o dinheiro"],
+    ["panorama", "Onde seu dinheiro está", "Saldo em conta, guardado, investido e disponível"],
+    ["comparacao", "Comparação com o período anterior", "Cada categoria, antes e agora"],
+    ["metas", "Metas das caixinhas", "Progresso e previsão de cada meta que você definiu"],
+    ["evolucao", "Evolução do patrimônio", "Como o total cresceu nos últimos 12 meses"],
+  ];
+
+  const gerar = () => {
+    if (nenhumaSecao) { flash("Escolha ao menos uma seção para incluir"); return; }
+    const resumo = resumoPeriodo(d, periodo, catOf);
+    const linhaTempo = evolucao(d, mesesComMovimento(d, 12));
+    const contas = d.contas.filter((c) => c.tipo === "caixinha" || c.tipo === "investimento")
+      .map((c) => ({ ...c, ...progressoCaixinha(d, c) }));
+    const html = relatorioHTML({ rotulo, resumo, linhaTempo, contas,
+      panorama: panorama(d, periodo[periodo.length - 1]), secoes });
+    exportarRelatorio(html, periodo[periodo.length - 1], flash);
+    onClose();
+  };
+
+  return (
+    <Painel titulo="Personalizar relatório" sub={rotulo} onClose={onClose}
+      rodape={
+        <button onClick={gerar} disabled={nenhumaSecao}
+          style={{ background: nenhumaSecao ? C.line : C.ink, color: nenhumaSecao ? C.muted : "#fff" }}
+          className="w-full rounded-xl py-2.5 text-sm font-medium transition-transform active:scale-[0.98]">
+          Gerar PDF
+        </button>
+      }>
+      <Rotulo>Período</Rotulo>
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        {[[1, "Este mês"], [3, "3 meses"], [4, "4 meses"], [6, "6 meses"], [12, "12 meses"]].map(([n, t]) => (
+          <Chip key={n} ativo={!de && janela === n} cor={C.ink} onClick={() => { setJanela(n); setDe(""); setAte(""); }}>{t}</Chip>
+        ))}
+        <input type="month" value={de} onChange={(e) => setDe(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
+          className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+        <span style={{ color: C.muted }} className="text-xs">até</span>
+        <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
+          className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+      </div>
+
+      <Rotulo>O que incluir</Rotulo>
+      <div className="space-y-3">
+        {OPCOES.map(([k, titulo, desc]) => (
+          <label key={k} style={{ background: C.surface, borderColor: C.line }}
+            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer">
+            <input type="checkbox" checked={secoes[k]} onChange={(e) => setSecoes({ ...secoes, [k]: e.target.checked })}
+              className="mt-0.5 shrink-0" />
+            <span>
+              <span className="text-sm font-medium block">{titulo}</span>
+              <span style={{ color: C.muted }} className="text-xs">{desc}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </Painel>
+  );
+}
+
 function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
   const fora = (l) => anulado(l) || alheio(l);   // não conta como gasto seu
   const historico = useMemo(() => mesesComMovimento(d, 12), [d.lancamentos]);
@@ -2615,14 +2951,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
   const resumo = useMemo(() => resumoDoMes(d, M, catOf), [d, M]);
   const comparacao = useMemo(() => compararMeses(d, M, resumo.anterior, catOf), [d, M]);
 
-  const gerarRelatorio = () => {
-    const contas = d.contas
-      .filter((c) => c.tipo === "caixinha" || c.tipo === "investimento")
-      .map((c) => ({ ...c, ...progressoCaixinha(d, c) }));
-    const html = relatorioHTML({ mes: M, resumo, comparacao, linhaTempo, contas,
-      categorias: d.categorias, panorama: panorama(d, M) });
-    exportarRelatorio(html, M, flash);
-  };
+  const [configAberto, setConfigAberto] = useState(false);
   const [janela, setJanela] = useState(1);
   const [de, setDe] = useState("");
   const [ate, setAte] = useState("");
@@ -2679,7 +3008,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
       <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4 no-print-break">
         <div className="flex items-baseline justify-between mb-3">
           <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold capitalize">{mesLabel(M)}</h2>
-          <button onClick={gerarRelatorio} style={{ borderColor: C.line, color: C.muted }}
+          <button onClick={() => setConfigAberto(true)} style={{ borderColor: C.line, color: C.muted }}
             className="rounded-full border px-3 py-1 text-xs esconder-na-impressao flex items-center gap-1.5">
             <Download size={13} /> Relatório
           </button>
@@ -2856,12 +3185,17 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
         </div>
         <p style={{ color: C.muted }} className="text-xs mt-2">Transferências entre suas contas não aparecem aqui.</p>
       </div>
+
+      {configAberto && (
+        <ConfigRelatorio d={d} catOf={catOf} flash={flash}
+          periodoInicial={{ janela, de, ate }} onClose={() => setConfigAberto(false)} />
+      )}
     </>
   );
 }
 
 /* ================================================================ ajustes */
-function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia }) {
+function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes }) {
   const [aba, setAba] = useState("categorias");
   const set = (patch) => setD({ ...d, ...patch });
 
@@ -2904,7 +3238,7 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia }) {
         {aba === "categorias" && <AbaCategorias d={d} set={set} flash={flash} />}
         {aba === "contas" && <AbaContas d={d} set={set} flash={flash} />}
         {aba === "cartoes" && <AbaCartoes d={d} set={set} flash={flash} />}
-        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} />}
+        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} atualizarValorPendentes={atualizarValorPendentes} />}
         {aba === "dados" && (
           <>
             <Rotulo>Sincronia com a planilha</Rotulo>
@@ -2982,12 +3316,17 @@ function AbaCategorias({ d, set, flash }) {
               {c.id !== "renda" && (
                 <span className="flex items-center gap-1">
                   <span style={{ color: C.muted }} className="text-xs">R$</span>
-                  <input value={c.orcamento ?? 0} onChange={(e) => upCat(c.id, { orcamento: num(e.target.value) })} inputMode="decimal"
+                  <input value={c.orcamento ?? 0} onChange={(e) => upCat(c.id, { orcamento: Math.max(0, num(e.target.value)) })} inputMode="decimal"
                     style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-20 rounded-lg border px-2 py-1 text-xs outline-none" />
                 </span>
               )}
               <button onClick={() => setAberta(abertaId === c.id ? null : c.id)} style={{ color: C.muted }}><Pencil size={14} /></button>
               <BotaoConfirma onConfirm={() => {
+                // "renda" é a categoria fixa das entradas — o app inteiro assume
+                // que ela existe. Apagá-la deixaria "lançar uma entrada" sem
+                // nenhuma categoria para escolher.
+                if (c.id === "renda") return flash("Esta categoria é a base das entradas e não pode ser apagada.");
+                if (d.categorias.length <= 1) return flash("Precisa sobrar pelo menos uma categoria.");
                 const usos = d.lancamentos.filter((l) => l.catId === c.id).length;
                 const recs = d.recorrentes.filter((r) => r.catId === c.id).length;
                 if (usos || recs) return flash(
@@ -3001,7 +3340,13 @@ function AbaCategorias({ d, set, flash }) {
                   {(c.subs || []).map((s) => (
                     <span key={s.id} style={{ background: C.bg, borderColor: C.line }} className="rounded-full border px-2 py-1 text-xs flex items-center gap-1">
                       {s.nome}
-                      <button onClick={() => upCat(c.id, { subs: c.subs.filter((x) => x.id !== s.id) })}><X size={11} /></button>
+                      <button onClick={() => {
+                        const usos = d.lancamentos.filter((l) => l.subId === s.id).length;
+                        const recs = d.recorrentes.filter((r) => r.subId === s.id).length;
+                        if (usos || recs) return flash(
+                          `${s.nome} está em uso: ${usos} lançamento(s)${recs ? ` e ${recs} fixa(s)` : ""}. Mova antes de apagar.`);
+                        upCat(c.id, { subs: c.subs.filter((x) => x.id !== s.id) });
+                      }} title="Apagar subcategoria"><X size={11} /></button>
                     </span>
                   ))}
                 </div>
@@ -3048,6 +3393,9 @@ function AbaContas({ d, set, flash }) {
               const usos = d.lancamentos.filter((l) => l.contaId === c.id || l.destinoId === c.id).length;
               const cartoes = d.cartoes.filter((k) => k.contaPagamentoId === c.id).length;
               const fixas = d.recorrentes.filter((r) => r.contaId === c.id).length;
+              const restariam = d.contas.filter((x) => (x.tipo === "banco" || x.tipo === "fisico") && x.id !== c.id).length;
+              if ((c.tipo === "banco" || c.tipo === "fisico") && restariam === 0)
+                return flash("Precisa sobrar ao menos uma conta de banco ou espécie — é para onde o app manda o dinheiro por padrão.");
               if (cartoes) return flash(`${cartoes} cartão(ões) pagam por esta conta. Troque a conta deles primeiro.`);
               if (fixas) return flash(`${fixas} conta(s) fixa(s) usam esta conta. Troque em Recorrentes primeiro.`);
               if (usos) flash(`${c.nome} tinha ${usos} lançamento(s), que ficaram sem conta.`);
@@ -3058,7 +3406,7 @@ function AbaContas({ d, set, flash }) {
           {(c.tipo === "caixinha" || c.tipo === "investimento") && (
             <div style={{ borderColor: C.line }} className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t">
               <span style={{ color: C.muted }} className="text-xs">Meta</span>
-              <input value={c.meta || ""} onChange={(e) => upC(c.id, { meta: num(e.target.value) })} inputMode="decimal" placeholder="sem meta"
+              <input value={c.meta || ""} onChange={(e) => upC(c.id, { meta: Math.max(0, num(e.target.value)) })} inputMode="decimal" placeholder="sem meta"
                 style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-24 rounded-lg border px-2 py-1 text-xs outline-none" />
               <span style={{ color: C.muted }} className="text-xs">até</span>
               <input type="month" value={c.prazo || ""} onChange={(e) => upC(c.id, { prazo: e.target.value || undefined })}
@@ -3134,7 +3482,7 @@ function AbaCartoes({ d, set, flash }) {
   );
 }
 
-function AbaRecorrentes({ d, set, flash, apagarRecorrencia }) {
+function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPendentes }) {
   const [aberta, setAberta] = useState(null);
   const [nova, setNova] = useState(false);
   const upR = (id, patch) => set({ recorrentes: d.recorrentes.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
@@ -3161,7 +3509,7 @@ function AbaRecorrentes({ d, set, flash, apagarRecorrencia }) {
         {d.recorrentes.map((r) => (
           <EditorRecorrente key={r.id} r={r} d={d} contasUso={contasUso}
             aberta={aberta === r.id} onToggle={() => setAberta(aberta === r.id ? null : r.id)}
-            upR={upR} flash={flash}
+            upR={upR} flash={flash} atualizarValorPendentes={atualizarValorPendentes}
             onApagar={() => { apagarRecorrencia(r.id); setAberta(null); }} />
         ))}
         {d.recorrentes.length === 0 && <Vazio>Nenhuma conta fixa cadastrada.</Vazio>}
@@ -3179,11 +3527,12 @@ function AbaRecorrentes({ d, set, flash, apagarRecorrencia }) {
 }
 
 /** Uma conta fixa: resumo fechado, todos os campos quando aberta. */
-function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, flash }) {
+function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, flash, atualizarValorPendentes }) {
   const [cents, setCents] = useState(Math.round((r.valor || 0) * 100));
   const [diaTxt, setDiaTxt] = useState(String(r.dia || 1));
   useEffect(() => { setCents(Math.round((r.valor || 0) * 100)); setDiaTxt(String(r.dia || 1)); }, [r.id]);
   const inp = { background: C.bg, borderColor: C.line, color: C.ink };
+  const pendentes = d.lancamentos.filter((l) => l.recId === r.id && l.status === "pendente").length;
   const cat = d.categorias.find((c) => c.id === r.catId);
   const via = r.forma === "Crédito"
     ? d.cartoes.find((c) => c.id === r.cartaoId)?.nome || "cartão"
@@ -3224,6 +3573,18 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
                 onBlur={() => { const n = Math.min(28, Math.max(1, parseInt(diaTxt, 10) || 1)); setDiaTxt(String(n)); upR(r.id, { dia: n }); }}
                 style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
           </div>
+          {pendentes > 0 && (
+            <div style={{ background: C.due + "14" }} className="rounded-xl p-2.5">
+              <p style={{ color: C.due }} className="text-xs mb-1.5">
+                Mudar o valor acima só vale para os meses ainda não gerados. Há {pendentes} cobrança(s)
+                já pendente(s) com o valor antigo.
+              </p>
+              <button onClick={() => atualizarValorPendentes(r.id, cents / 100)}
+                style={{ borderColor: C.due, color: C.due }} className="w-full rounded-lg border py-1.5 text-xs">
+                Atualizar as {pendentes} pendentes para {brl(cents / 100)}
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <div><Rotulo>Categoria</Rotulo>
@@ -3380,11 +3741,19 @@ function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, car
 }
 
 /** Detalhe de um lançamento, com edição de todos os campos. */
-function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, apagarRecorrencia, salvar, pagar, despagar, anulado, flash }) {
+function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, apagarRecorrencia, duplicarLancamento, salvar, pagar, despagar, anulado, flash }) {
   const [edit, setEdit] = useState(false);
   const [f, setF] = useState(null);
 
   useEffect(() => { if (l) setF({ ...l, cents: Math.round(l.valor * 100) }); }, [l?.id]);
+
+  /** Copia o lançamento para um novo, pendente e sem vínculo com parcelas ou
+      recorrência, e já abre a cópia para você mudar a data. */
+  const duplicar = () => {
+    const novoId = duplicarLancamento(l);
+    onClose();
+    setTimeout(() => abrir(novoId), 50);
+  };
   if (!l || !f) return null;
 
   const contasUso = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
@@ -3434,7 +3803,7 @@ function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios,
       rodape={
         <div className="flex gap-2">
           {!edit && l.tipo !== "transferencia" && (l.status === "pendente"
-            ? <button onClick={() => { pagar(l); onClose(); }} style={{ background: C.in }} className="flex-1 rounded-xl py-2.5 text-sm text-white font-medium">
+            ? <button onClick={() => { pagar(l); onClose(); }} style={{ background: C.in }} className="flex-1 rounded-xl py-2.5 text-sm text-white font-medium transition-transform active:scale-[0.98]">
                 {l.tipo === "entrada" ? "Marcar recebido" : "Marcar pago"}</button>
             : <button onClick={() => { despagar(l.id); onClose(); }} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm">
                 Desfazer</button>)}
@@ -3444,6 +3813,10 @@ function Detalhe({ l, d, onClose, catOf, subOf, contaOf, cartaoOf, up, upVarios,
                 <button onClick={salvarEdicao} style={{ background: C.ink }} className="flex-1 rounded-xl py-2.5 text-sm text-white font-medium">Salvar</button>
               </>
             : <button onClick={() => setEdit(true)} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm flex items-center justify-center gap-1.5"><Pencil size={15} /> Editar</button>}
+          {!edit && (
+            <button onClick={duplicar} title="Duplicar" aria-label="Duplicar lançamento"
+              style={{ borderColor: C.line, color: C.muted }} className="rounded-xl border px-3 py-2.5"><Copy size={16} /></button>
+          )}
           {!edit && (
             <BotaoConfirma onConfirm={() => { apagar(l.id); onClose(); }} pergunta="Apagar mesmo"
               titulo="Apagar lançamento" className="rounded-xl border px-3 py-2.5" estilo={{ borderColor: C.line }}>
@@ -3771,9 +4144,58 @@ function CampoInteiro({ valor, onValor, min = 1, max = 99, style, className }) {
   );
 }
 
+/** Um valor por mês, em barras. SVG puro, sem depender de biblioteca de
+    gráficos — funciona idêntico aqui no chat e no site publicado, sem
+    precisar de nenhuma troca no momento de gerar o site. */
+function GraficoMeses({ dados, cor = C.due, altura = 176, onColuna }) {
+  const [ativo, setAtivo] = useState(null);
+  const L = 44, R = 6, T = 8, B = 26, larg = 600, alt = altura;
+  const areaL = larg - L - R, areaA = alt - T - B;
+  const max = Math.max(1, ...dados.map((d) => d.valor));
+  const passo = (() => { const b = max / 4, e = Math.pow(10, Math.floor(Math.log10(b || 1))); return Math.ceil(b / e) * e || 1; })();
+  const teto = Math.ceil(max / passo) * passo || 1;
+  const linhas = Array.from({ length: Math.round(teto / passo) + 1 }, (_, i) => i * passo);
+  const lg = areaL / (dados.length || 1);
+  const largBarra = Math.min(28, lg * 0.6);
+
+  return (
+    <svg viewBox={`0 0 ${larg} ${alt}`} preserveAspectRatio="none" className="w-full" role="img" aria-label="Valor por mês">
+      {linhas.map((v) => {
+        const y = T + areaA - (v / teto) * areaA;
+        return (
+          <g key={v}>
+            <line x1={L} y1={y} x2={larg - R} y2={y} stroke={C.line} strokeWidth="1" />
+            <text x={L - 6} y={y + 3} textAnchor="end" style={{ fontSize: 10, fill: C.muted, fontFamily: MONO }}>
+              {v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "k" : v}
+            </text>
+          </g>
+        );
+      })}
+      {dados.map((d, i) => {
+        const h = (d.valor / teto) * areaA;
+        const x = L + i * lg + (lg - largBarra) / 2, y = T + areaA - h;
+        return (
+          <g key={d.chave} onClick={() => onColuna?.(d)} style={{ cursor: onColuna ? "pointer" : "default" }}
+            onMouseEnter={() => setAtivo(i)} onMouseLeave={() => setAtivo(null)} onTouchStart={() => setAtivo(i)}>
+            <rect x={L + i * lg} y={T} width={lg} height={areaA} fill="transparent" />
+            {h > 0 && (
+              <rect x={x} y={y} width={largBarra} height={h} rx="4" fill={cor}
+                opacity={ativo == null || ativo === i ? 1 : 0.4} style={{ transition: "opacity .15s" }}>
+                <title>{`${d.rot}: ${brl(d.valor)}`}</title>
+              </rect>
+            )}
+            <text x={L + i * lg + lg / 2} y={alt - B + 14} textAnchor="middle"
+              style={{ fontSize: 10, fill: ativo === i ? C.ink : C.muted }}>{d.rot}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 const Chip = ({ ativo, cor, children, onClick }) => (
   <button onClick={onClick} style={{ background: ativo ? cor : C.bg, color: ativo ? "#fff" : C.ink, borderColor: ativo ? cor : C.line }}
-    className="rounded-full border px-3 py-1.5 text-xs font-medium">{children}</button>
+    className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150 active:scale-95">{children}</button>
 );
 
 const Vazio = ({ children }) => <p style={{ color: C.muted }} className="text-sm py-4">{children}</p>;
