@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-11 22:53";
+const APP_BUILD = "2026-08-12 19:46";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1042,6 +1042,75 @@ function buscar(lancamentos, termo, ref = {}) {
 }
 
 /* ================================================================ regras */
+
+/* --------------------------------------------------- escopo de recorrência */
+/* O mesmo gesto que qualquer calendário faz ao mexer num evento que se
+   repete: perguntar se a mudança vale só para esta ocorrência, para esta e
+   as seguintes, ou para todas. Adaptado para dinheiro: "todas" só toca no
+   que ainda está pendente — o que já foi pago é história e não se reescreve
+   sozinho. */
+
+const CAMPOS_PROPAGAVEIS = ["valor", "catId", "subId", "forma", "contaId", "cartaoId"];
+
+/** Só vale perguntar o escopo quando um campo que faz sentido propagar
+    mudou de verdade. Data, status e observação são sempre só desta
+    ocorrência — perguntar por eles a cada edição seria atrito à toa. */
+function precisaEscolherEscopo(l, campos) {
+  if (!l.recId) return false;
+  return CAMPOS_PROPAGAVEIS.some((k) => campos[k] !== undefined && campos[k] !== l[k]);
+}
+
+/** Edita uma ocorrência de conta fixa com o escopo escolhido. */
+function editarComEscopo(d, l, campos, escopo) {
+  const editadoEm = new Date().toISOString();
+  if (escopo === "esta" || !l.recId) {
+    return { ...d, lancamentos: d.lancamentos.map((x) => (x.id === l.id ? { ...x, ...campos, editadoEm } : x)) };
+  }
+  const defPatch = {};
+  for (const k of CAMPOS_PROPAGAVEIS) if (campos[k] !== undefined) defPatch[k] = campos[k];
+  const recorrentes = d.recorrentes.map((r) => (r.id === l.recId ? { ...r, ...defPatch } : r));
+
+  const alvo = new Set(d.lancamentos
+    .filter((x) => x.recId === l.recId && x.status === "pendente" &&
+      (escopo === "todas" || x.vencimento >= l.vencimento))
+    .map((x) => x.id));
+  const lancamentos = d.lancamentos.map((x) => (alvo.has(x.id) ? { ...x, ...campos, editadoEm } : x));
+  return { ...d, recorrentes, lancamentos };
+}
+
+/** Apaga uma ocorrência de conta fixa com o escopo escolhido. */
+function apagarComEscopo(d, l, escopo) {
+  if (escopo === "esta" || !l.recId) {
+    return { ...d,
+      lancamentos: d.lancamentos.filter((x) => x.id !== l.id),
+      cancelados: l.src && !(d.cancelados || []).some((c) => c.id === l.src)
+        ? [...(d.cancelados || []), { id: l.src }] : d.cancelados };
+  }
+  if (escopo === "todas") {
+    return { ...d,
+      recorrentes: d.recorrentes.filter((r) => r.id !== l.recId),
+      lancamentos: d.lancamentos.filter((x) => !(x.recId === l.recId && x.status === "pendente")) };
+  }
+  // "seguintes": a série termina um mês antes desta ocorrência — o que já
+  // aconteceu antes dela (pago ou ainda pendente) fica intocado.
+  // Mas se não existe NADA antes dela — esta é a primeira cobrança que a
+  // recorrência já teve —, terminar "antes dela" deixaria a definição viva
+  // e listada em Ajustes, só que morta: nunca mais geraria nada, sem
+  // nenhum indício visível do motivo. Nesse caso, "seguintes" e "todas" são
+  // a mesma coisa de verdade, então tratamos como "todas".
+  const temAlgoAntes = d.lancamentos.some((x) => x.recId === l.recId && x.vencimento < l.vencimento);
+  if (!temAlgoAntes) {
+    return { ...d,
+      recorrentes: d.recorrentes.filter((r) => r.id !== l.recId),
+      lancamentos: d.lancamentos.filter((x) => !(x.recId === l.recId && x.status === "pendente")) };
+  }
+  const fimData = `${ym(addMonths(l.vencimento, -1))}-28`;
+  const recorrentes = d.recorrentes.map((r) => (r.id === l.recId ? { ...r, fim: { tipo: "data", data: fimData } } : r));
+  const lancamentos = d.lancamentos.filter((x) =>
+    !(x.recId === l.recId && x.status === "pendente" && x.vencimento >= l.vencimento));
+  return { ...d, recorrentes, lancamentos };
+}
+
 /* As regras de dinheiro vivem aqui, longe da tela: funções puras que recebem
    os dados e devolvem números. É o que permite testá-las de verdade, em vez
    de reescrever o raciocínio dentro de um teste e conferir a cópia. */
@@ -1199,6 +1268,18 @@ function Aplicacao() {
     })();
   }, []);
 
+  /* Refaz a geração dos meses futuros sempre que as contas fixas mudam —
+     criar uma nova, editar o dia/valor/prazo, ou apagar uma. Sem isto,
+     gerar() só rodava uma vez no carregamento, e uma conta fixa criada
+     durante o uso nunca via seus próprios meses seguintes até você
+     fechar e reabrir o app. gerar() é idempotente (não duplica nada que
+     já existe), então é seguro chamar de novo sempre que precisar. */
+  useEffect(() => {
+    if (!d) return;
+    const novo = gerar(d);
+    if (novo.lancamentos.length !== d.lancamentos.length) setD(novo);
+  }, [d?.recorrentes]);
+
   useEffect(() => {
     if (!d) return;
     clearTimeout(timer.current);
@@ -1322,8 +1403,11 @@ function Aplicacao() {
    */
   const comDesfazer = (msg, mutar, segundos = 8) => {
     // guarda as listas que as ações mexem; o resto do estado segue vivo,
-    // para não atropelar o que a sincronia trouxer nesses segundos
-    const antes = { lancamentos: d.lancamentos, cancelados: d.cancelados };
+    // para não atropelar o que a sincronia trouxer nesses segundos.
+    // "recorrentes" entrou aqui por causa das ações de escopo (editar/apagar
+    // "esta e as seguintes" ou "todas"), que mudam a própria definição da
+    // conta fixa — sem isso, desfazer deixaria a definição alterada.
+    const antes = { lancamentos: d.lancamentos, cancelados: d.cancelados, recorrentes: d.recorrentes };
     mutar();
     clearTimeout(relogioToast.current);
     setToast({
@@ -1369,13 +1453,13 @@ function Aplicacao() {
         grupo, parcela: n > 1 ? i + 1 : undefined, parcelas: n > 1 ? n : undefined });
     }
     comDesfazer(n > 1 ? `Lançado em ${n}×` : "Lançado",
-      () => setD({ ...d, lancamentos: [...novos, ...d.lancamentos] }));
+      () => setD((atual) => ({ ...atual, lancamentos: [...novos, ...atual.lancamentos] })));
   };
   const agora = () => new Date().toISOString();
-  const up = (id, patch) => setD({ ...d, lancamentos: d.lancamentos.map((l) => (l.id === id ? { ...l, ...patch, editadoEm: agora() } : l)) });
+  const up = (id, patch) => setD((atual) => ({ ...atual, lancamentos: atual.lancamentos.map((l) => (l.id === id ? { ...l, ...patch, editadoEm: agora() } : l)) }));
   const upVarios = (ls, patch) => {
     const ids = new Set(ls.map((l) => l.id));
-    setD({ ...d, lancamentos: d.lancamentos.map((l) => (ids.has(l.id) ? { ...l, ...patch, editadoEm: agora() } : l)) });
+    setD((atual) => ({ ...atual, lancamentos: atual.lancamentos.map((l) => (ids.has(l.id) ? { ...l, ...patch, editadoEm: agora() } : l)) }));
   };
   const pagar = (l, conta) => comDesfazer(
     l.tipo === "entrada" ? "Recebido" : "Pago",
@@ -1384,42 +1468,55 @@ function Aplicacao() {
   const pagarVarios = (ls) => {
     const ids = new Set(ls.map((l) => l.id));
     comDesfazer(`${ls.length} ${ls.length === 1 ? "lançamento pago" : "lançamentos pagos"}`, () =>
-      setD({
-        ...d,
-        lancamentos: d.lancamentos.map((l) =>
+      setD((atual) => ({
+        ...atual,
+        lancamentos: atual.lancamentos.map((l) =>
           ids.has(l.id)
             ? { ...l, status: "pago", pagamento: today(), conferir: false,
                 contaId: l.cartaoId ? cartaoOf(l.cartaoId)?.contaPagamentoId : l.contaId }
             : l
         ),
-      }));
+      })));
   };
   const despagar = (id) => comDesfazer("Pagamento desfeito", () => up(id, { status: "pendente", pagamento: null }));
   const apagar = (id) => {
     const l = d.lancamentos.find((x) => x.id === id);
-    comDesfazer(`"${(l?.nome || "Lançamento").slice(0, 24)}" apagado`, () => setD({
-      ...d,
-      lancamentos: d.lancamentos.filter((x) => x.id !== id),
+    comDesfazer(`"${(l?.nome || "Lançamento").slice(0, 24)}" apagado`, () => setD((atual) => ({
+      ...atual,
+      lancamentos: atual.lancamentos.filter((x) => x.id !== id),
       // se veio de uma recorrência, marca que este mês foi cancelado,
       // senão ele seria recriado no próximo carregamento
-      cancelados: l?.src && !(d.cancelados || []).some((c) => c.id === l.src)
-        ? [...(d.cancelados || []), { id: l.src }] : d.cancelados,
-    }));
+      cancelados: l?.src && !(atual.cancelados || []).some((c) => c.id === l.src)
+        ? [...(atual.cancelados || []), { id: l.src }] : atual.cancelados,
+    })));
   };
 
   /** Apaga a conta fixa inteira: futuras cobranças somem, as já pagas ficam
       como histórico. Complementa apagar(), que só cuida de uma ocorrência. */
   const apagarRecorrencia = (recId) => {
     const nome = d.recorrentes.find((r) => r.id === recId)?.nome || "Conta fixa";
-    comDesfazer(`"${nome}" apagada — próximas cobranças removidas`, () => setD({
-      ...d,
-      recorrentes: d.recorrentes.filter((r) => r.id !== recId),
-      lancamentos: d.lancamentos.filter((l) => !(l.recId === recId && l.status === "pendente")),
-    }));
+    comDesfazer(`"${nome}" apagada — próximas cobranças removidas`, () => setD((atual) => ({
+      ...atual,
+      recorrentes: atual.recorrentes.filter((r) => r.id !== recId),
+      lancamentos: atual.lancamentos.filter((l) => !(l.recId === recId && l.status === "pendente")),
+    })));
   };
 
   /** Cria uma conta fixa a partir do formulário de lançar, sem passar por Ajustes. */
-  const criarRecorrente = (rec) => setD({ ...d, recorrentes: [...d.recorrentes, rec] });
+  const criarRecorrente = (rec) => setD((atual) => ({ ...atual, recorrentes: [...atual.recorrentes, rec] }));
+
+  /* As duas funções abaixo são o modelo de calendário aplicado a dinheiro:
+     "só esta / esta e as seguintes / todas" — ver editarComEscopo/
+     apagarComEscopo nas regras puras, acima. */
+  const editarLancamentoComEscopo = (l, campos, escopo) =>
+    comDesfazer(`"${l.nome}" atualizado`, () => setD((atual) => editarComEscopo(atual, l, campos, escopo)));
+
+  const apagarLancamentoComEscopo = (l, escopo) => {
+    const msg = escopo === "esta" ? `"${l.nome}" apagado`
+      : escopo === "todas" ? `"${l.nome}" apagado — toda a conta fixa`
+      : `"${l.nome}" apagado — a conta fixa termina aqui`;
+    comDesfazer(msg, () => setD((atual) => apagarComEscopo(atual, l, escopo)));
+  };
 
   /** Copia um lançamento para um novo, solto de parcelas ou recorrência,
       pendente e pronto para você mudar a data. Devolve o novo id, para o
@@ -1430,7 +1527,7 @@ function Aplicacao() {
     // se o original já tinha sido acertado (reembolso ou gasto de terceiro),
     // a cópia é uma dívida nova — ninguém pagou por ela ainda
     const reembolso = resto.reembolso === "recebido" ? (resto.deQuem ? "aguardando" : "nao") : resto.reembolso;
-    setD({ ...d, lancamentos: [{ ...resto, id: novoId, status: "pendente", pagamento: null, reembolso, criadoEm: new Date().toISOString() }, ...d.lancamentos] });
+    setD((atual) => ({ ...atual, lancamentos: [{ ...resto, id: novoId, status: "pendente", pagamento: null, reembolso, criadoEm: new Date().toISOString() }, ...atual.lancamentos] }));
     flash(`"${l.nome}" duplicado`);
     return novoId;
   };
@@ -1444,7 +1541,7 @@ function Aplicacao() {
     comDesfazer(`${alvo.length} cobrança(s) atualizadas para ${brl(novoValor)}`, () => upVarios(alvo, { valor: novoValor }));
   };
 
-  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
+  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M };
 
@@ -1512,7 +1609,7 @@ function Aplicacao() {
       {detalheSync && (
         <DetalheSync sync={sync} onClose={() => setDetalheSync(false)}
           onTestar={() => { sincronizar(d); setDetalheSync(false); }}
-          onConferirTudo={() => { setD({ ...d, ateOnde: 0 }); setDetalheSync(false); flash("Conferindo tudo com a planilha…"); }} />
+          onConferirTudo={() => { setD((atual) => ({ ...atual, ateOnde: 0 })); setDetalheSync(false); flash("Conferindo tudo com a planilha…"); }} />
       )}
 
       {compartilhando && (
@@ -1643,6 +1740,38 @@ function CompartilharTexto({ quem, texto, onClose, flash }) {
       <textarea ref={areaRef} readOnly value={texto} rows={8} onFocus={(e) => e.target.select()}
         style={{ background: C.surface, borderColor: C.line, color: C.ink, fontFamily: MONO }}
         className="w-full rounded-xl border p-3 text-sm outline-none resize-none" />
+    </Painel>
+  );
+}
+
+/** A mesma pergunta que qualquer calendário faz ao mexer num evento que se
+    repete — só que explicada em dinheiro, não em datas de reunião. */
+function EscopoRecorrencia({ acao, nome, onEscolher, onClose }) {
+  const titulo = acao === "apagar" ? `Apagar "${nome}"` : `Salvar "${nome}"`;
+  const OPCOES = acao === "apagar" ? [
+    ["esta", "Só esta cobrança", "Os outros meses continuam exatamente como estavam."],
+    ["seguintes", "Esta e as próximas", "A conta fixa termina aqui. O que já passou fica no histórico."],
+    ["todas", "Toda a conta fixa", "Apaga a recorrência inteira. O que já foi pago continua guardado."],
+  ] : [
+    ["esta", "Só esta cobrança", "As próximas continuam com os valores de antes."],
+    ["seguintes", "Esta e as próximas", "Atualiza esta e todas as que ainda não aconteceram."],
+    ["todas", "Toda a conta fixa", "Atualiza todas as pendentes, mesmo as de meses anteriores."],
+  ];
+  return (
+    <Painel titulo={titulo} sub="É uma conta fixa — o que isso deve afetar?" onClose={onClose}>
+      <div className="space-y-2">
+        {OPCOES.map(([k, t, desc]) => (
+          <button key={k} onClick={() => onEscolher(k)}
+            style={{ background: C.surface, borderColor: C.line }}
+            className="w-full text-left rounded-xl border p-3 flex items-start gap-3 transition-transform active:scale-[0.99]">
+            <Repeat size={16} style={{ color: C.due }} className="shrink-0 mt-0.5" />
+            <span>
+              <span className="text-sm font-medium block">{t}</span>
+              <span style={{ color: C.muted }} className="text-xs">{desc}</span>
+            </span>
+          </button>
+        ))}
+      </div>
     </Painel>
   );
 }
@@ -2323,6 +2452,7 @@ function Lancar({ d, catOf, subOf, contaOf, cartaoOf, salvar, criarRecorrente, a
         <span style={{ color: C.muted }} className="text-xs">até</span>
         <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
           className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+        <AvisoIntervalo de={de} ate={ate} />
       </div>
       {periodo && (
         <p style={{ color: C.muted }} className="text-xs mb-3 capitalize">
@@ -2469,8 +2599,10 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
      COLECOES, é guardado neste aparelho e não viaja para os outros. */
   const fechados = d.painelAgora || [];
   const aberto = (id) => !fechados.includes(id);
-  const alternar = (id) => setD({ ...d,
-    painelAgora: aberto(id) ? [...fechados, id] : fechados.filter((x) => x !== id) });
+  const alternar = (id) => setD((atual) => {
+    const f = atual.painelAgora || [];
+    return { ...atual, painelAgora: f.includes(id) ? f.filter((x) => x !== id) : [...f, id] };
+  });
 
   const Grupo = ({ id, titulo, contas }) => (
     <Bloco id={id} titulo={titulo} resumo={brl(somaC(contas, (c) => saldoConta(c.id)))}
@@ -2612,12 +2744,13 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
   const [nome, setNome] = useState("");
   const [valor, setValor] = useState("");
 
-  const limite = de && ate ? null : addMonths(today(), janela).slice(0, 7);
+  const intervaloValido = de && ate && de <= ate;
+  const limite = intervaloValido ? null : addMonths(today(), janela).slice(0, 7);
   const lista = d.lancamentos.filter((l) => {
     if (l.tipo === "entrada") return false;
     const k = ym(l.vencimento);
     if (k < mesAtual() && l.status === "pago") return false;
-    if (de && ate) return k >= de && k <= ate;
+    if (intervaloValido) return k >= de && k <= ate;
     return k <= limite && k >= mesAtual();
   });
 
@@ -2632,14 +2765,17 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
     const v = num(valor);
     if (!nome.trim()) { flash("Dê um nome para a intenção"); return; }
     if (v <= 0) { flash("Digite um valor maior que zero"); return; }
-    setD({ ...d, intencoes: [...(d.intencoes || []), { id: uid(), nome, valor: v, obs: "" }] });
+    setD((atual) => ({ ...atual, intencoes: [...(atual.intencoes || []), { id: uid(), nome, valor: v, obs: "" }] }));
     setNome(""); setValor("");
     flash("Intenção anotada");
   };
   const virarConta = (i) => {
-    setD({ ...d, intencoes: d.intencoes.filter((x) => x.id !== i.id),
+    // a conta vem dos seus dados de verdade, nunca de um id fixo — sem isso,
+    // a conta some silenciosamente se você não tiver uma com esse nome
+    const contaPadrao = d.contas.find((c) => c.tipo === "banco" || c.tipo === "fisico")?.id;
+    setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id),
       lancamentos: [{ id: uid(), tipo: "saida", nome: i.nome, valor: i.valor, catId: "outros", forma: "Pix",
-        contaId: "nubank", vencimento: addMonths(today(), 1), pagamento: null, status: "pendente", obs: "", reembolso: "nao" }, ...d.lancamentos] });
+        contaId: contaPadrao, vencimento: addMonths(today(), 1), pagamento: null, status: "pendente", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
     flash("Virou conta prevista — ajuste a data em Mais detalhes");
   };
   const totIntencoes = somaC(d.intencoes || []);
@@ -2666,6 +2802,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
         <span style={{ color: C.muted }} className="text-xs">até</span>
         <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
           className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+        <AvisoIntervalo de={de} ate={ate} />
       </div>
 
       {meses.length === 0 && <Vazio>Nenhum compromisso nesse intervalo.</Vazio>}
@@ -2744,7 +2881,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
             <span className="flex-1 text-sm">{i.nome}</span>
             <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
             <button onClick={() => virarConta(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virar conta</button>
-            <button onClick={() => setD({ ...d, intencoes: d.intencoes.filter((x) => x.id !== i.id) })} style={{ color: C.muted }}><Trash2 size={14} /></button>
+            <button onClick={() => setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id) }))} style={{ color: C.muted }}><Trash2 size={14} /></button>
           </div>
         ))}
       </div>
@@ -2774,9 +2911,9 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
     const n = num(v); if (n <= 0) return;
     if (!origemEfetiva) { flash("Cadastre uma conta de banco ou espécie primeiro"); return; }
     const de = sentido > 0 ? origemEfetiva : destinoId, para = sentido > 0 ? destinoId : origemEfetiva;
-    setD({ ...d, lancamentos: [{ id: uid(), tipo: "transferencia", nome: sentido > 0 ? "Guardei" : "Retirei",
+    setD((atual) => ({ ...atual, lancamentos: [{ id: uid(), tipo: "transferencia", nome: sentido > 0 ? "Guardei" : "Retirei",
       valor: n, forma: "Pix", contaId: de, destinoId: para, vencimento: today(), pagamento: today(),
-      status: "pago", obs: "", reembolso: "nao" }, ...d.lancamentos] });
+      status: "pago", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
     setMov(null); setV(""); flash(sentido > 0 ? "Guardado" : "Retirado");
   };
 
@@ -2924,6 +3061,7 @@ function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
         <span style={{ color: C.muted }} className="text-xs">até</span>
         <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
           className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+        <AvisoIntervalo de={de} ate={ate} />
       </div>
 
       <Rotulo>O que incluir</Rotulo>
@@ -3087,6 +3225,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
         <span style={{ color: C.muted }} className="text-xs">até</span>
         <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
           className="rounded-full border px-3 py-1.5 text-xs outline-none" />
+        <AvisoIntervalo de={de} ate={ate} />
       </div>
       <p style={{ color: C.muted }} className="text-xs mb-4 capitalize">
         {rotulo}{periodo.length > 1 ? ` · ${periodo.length} meses` : ""}
@@ -3197,7 +3336,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
 /* ================================================================ ajustes */
 function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes }) {
   const [aba, setAba] = useState("categorias");
-  const set = (patch) => setD({ ...d, ...patch });
+  const set = (patch) => setD((atual) => ({ ...atual, ...patch }));
 
 
   const exportar = () => {
@@ -3279,7 +3418,7 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atua
             <Rotulo>Apagar tudo</Rotulo>
             <BotaoConfirma
               onConfirm={() => comDesfazer(`${d.lancamentos.length} lançamentos apagados`, () =>
-                setD({ ...d, lancamentos: [], cancelados: [] }))}
+                setD((atual) => ({ ...atual, lancamentos: [], cancelados: [] })))}
               pergunta="Apagar todos os lançamentos" cor={C.out} estilo={{ borderColor: C.line }}
               className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5">
               <Trash2 size={15} /> Apagar todos os lançamentos
@@ -3666,16 +3805,30 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
 
 /* ====================================================== detalhe e listas */
 
+/* Pilha de painéis abertos, fora do React: existe só para o Esc saber qual
+   painel fechar quando há mais de um aberto ao mesmo tempo — por exemplo a
+   pergunta de escopo de uma conta fixa, aberta por cima do detalhe do
+   lançamento. Sem isto, os dois ouviam a mesma tecla e fechavam juntos. */
+let pilhaPaineis = [];
+
 /** Painel deslizante genérico, usado pelo detalhe e pelas listas. */
 function Painel({ titulo, sub, onClose, children, rodape }) {
+  const meuId = useRef(null);
+  if (meuId.current === null) meuId.current = {};   // identidade estável por instância
+
   useEffect(() => {
-    const esc = (e) => e.key === "Escape" && onClose();
+    pilhaPaineis.push(meuId.current);
+    const esc = (e) => {
+      // só o painel do topo da pilha reage — os de baixo ficam quietos
+      if (e.key === "Escape" && pilhaPaineis[pilhaPaineis.length - 1] === meuId.current) onClose();
+    };
     window.addEventListener("keydown", esc);
     // trava a rolagem do fundo, senão a página corre atrás do painel no celular
     const antes = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", esc);
+      pilhaPaineis = pilhaPaineis.filter((id) => id !== meuId.current);
       document.body.style.overflow = antes;
     };
   }, [onClose]);
@@ -3741,9 +3894,10 @@ function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, car
 }
 
 /** Detalhe de um lançamento, com edição de todos os campos. */
-function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, apagarRecorrencia, duplicarLancamento, salvar, pagar, despagar, anulado, flash }) {
+function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, editarLancamentoComEscopo, apagarLancamentoComEscopo, duplicarLancamento, salvar, pagar, despagar, anulado, flash }) {
   const [edit, setEdit] = useState(false);
   const [f, setF] = useState(null);
+  const [pedirEscopo, setPedirEscopo] = useState(null);   // null | { acao: "editar"|"apagar", campos? }
 
   useEffect(() => { if (l) setF({ ...l, cents: Math.round(l.valor * 100) }); }, [l?.id]);
 
@@ -3776,9 +3930,20 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
       onClose();
       return;
     }
+
+    // conta fixa e mudou algo que faz sentido propagar: pergunta o alcance,
+    // do jeito que qualquer calendário pergunta ao mexer num evento repetido
+    if (precisaEscolherEscopo(l, limpo)) { setPedirEscopo({ acao: "editar", campos: limpo }); return; }
+
     up(l.id, limpo);
     setEdit(false);
     flash("Lançamento atualizado");
+  };
+
+  const escolherEscopo = (escopo) => {
+    if (pedirEscopo.acao === "editar") { editarLancamentoComEscopo(l, pedirEscopo.campos, escopo); onClose(); }
+    else { apagarLancamentoComEscopo(l, escopo); onClose(); }
+    setPedirEscopo(null);
   };
 
   /* aplica o mesmo valor às demais parcelas ainda abertas */
@@ -3818,10 +3983,13 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
               style={{ borderColor: C.line, color: C.muted }} className="rounded-xl border px-3 py-2.5"><Copy size={16} /></button>
           )}
           {!edit && (
-            <BotaoConfirma onConfirm={() => { apagar(l.id); onClose(); }} pergunta="Apagar mesmo"
-              titulo="Apagar lançamento" className="rounded-xl border px-3 py-2.5" estilo={{ borderColor: C.line }}>
-              <Trash2 size={16} />
-            </BotaoConfirma>
+            l.recId
+              ? <button onClick={() => setPedirEscopo({ acao: "apagar" })} aria-label="Apagar lançamento" title="Apagar"
+                  style={{ borderColor: C.line, color: C.out }} className="rounded-xl border px-3 py-2.5"><Trash2 size={16} /></button>
+              : <BotaoConfirma onConfirm={() => { apagar(l.id); onClose(); }} pergunta="Apagar mesmo"
+                  titulo="Apagar lançamento" className="rounded-xl border px-3 py-2.5" estilo={{ borderColor: C.line }}>
+                  <Trash2 size={16} />
+                </BotaoConfirma>
           )}
         </div>
       }>
@@ -4022,17 +4190,17 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
 
           {l.recId && (
             <div style={{ background: C.due + "14" }} className="rounded-xl p-3 mt-5">
-              <p style={{ color: C.due }} className="text-xs mb-2 flex items-center gap-1.5">
-                <Repeat size={13} /> Isto é uma conta fixa. O botão de apagar no rodapé remove só esta cobrança.
+              <p style={{ color: C.due }} className="text-xs flex items-center gap-1.5">
+                <Repeat size={13} /> Isto é uma conta fixa. Editar ou apagar vai perguntar o que isso deve afetar.
               </p>
-              <BotaoConfirma onConfirm={() => { apagarRecorrencia(l.recId); onClose(); }}
-                pergunta="Apagar a recorrência inteira" cor={C.due}
-                className="w-full rounded-lg border py-1.5 text-xs" estilo={{ borderColor: C.due }}>
-                Apagar todas as próximas cobranças
-              </BotaoConfirma>
             </div>
           )}
         </div>
+      )}
+
+      {pedirEscopo && (
+        <EscopoRecorrencia acao={pedirEscopo.acao} nome={l.nome}
+          onEscolher={escolherEscopo} onClose={() => setPedirEscopo(null)} />
       )}
     </Painel>
   );
@@ -4128,6 +4296,12 @@ function BotaoConfirma({ onConfirm, children, pergunta = "Tem certeza?", cor = C
 
 /* =========================================================== componentes */
 const Rotulo = ({ children }) => <div style={{ color: C.muted }} className="text-xs uppercase tracking-wider mb-2">{children}</div>;
+
+/** Avisa quando "até" vem antes de "de" — sem isso, o intervalo era ignorado
+    ou, pior, mostrava uma lista vazia sem explicar o motivo. */
+const AvisoIntervalo = ({ de, ate }) => (de && ate && de > ate) ? (
+  <span style={{ color: C.out }} className="text-xs w-full">"até" precisa vir depois de "de"</span>
+) : null;
 
 /** Campo de número inteiro que aceita apagar e redigitar sem travar num valor
     mínimo. Um <input type="number"> controlado força de volta um valor a
