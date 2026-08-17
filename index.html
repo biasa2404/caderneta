@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-12 19:46";
+const APP_BUILD = "2026-08-17 21:35";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -1074,7 +1074,15 @@ function editarComEscopo(d, l, campos, escopo) {
     .filter((x) => x.recId === l.recId && x.status === "pendente" &&
       (escopo === "todas" || x.vencimento >= l.vencimento))
     .map((x) => x.id));
-  const lancamentos = d.lancamentos.map((x) => (alvo.has(x.id) ? { ...x, ...campos, editadoEm } : x));
+  // a ocorrência que você editou recebe tudo (é a edição de verdade);
+  // as outras só recebem os campos propagáveis — nunca id, data, status ou
+  // src, que são específicos de cada mês. Copiar o objeto inteiro faria
+  // setembro virar uma cópia de agosto, com o mesmo identificador.
+  const lancamentos = d.lancamentos.map((x) => {
+    if (x.id === l.id) return { ...x, ...campos, editadoEm };
+    if (alvo.has(x.id)) return { ...x, ...defPatch, editadoEm };
+    return x;
+  });
   return { ...d, recorrentes, lancamentos };
 }
 
