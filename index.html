@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-17 21:35";
+const APP_BUILD = "2026-08-17 21:58";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -540,7 +540,7 @@ function seed() {
 }
 
 /* ================================================= geração de recorrentes */
-function gerar(d, meses = 12) {
+function gerar(d, meses = 24) {
   let out = [...d.lancamentos];
   const base = today();
   (d.recorrentes || []).forEach((r) => {
