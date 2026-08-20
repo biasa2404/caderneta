@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-17 21:58";
+const APP_BUILD = "2026-08-20 18:42";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -758,12 +758,124 @@ function resumoPeriodo(d, meses, catOf) {
     comparacao, maior, subiu, caiu, gastoMedio: +gastoMedio.toFixed(2), guardado, folga };
 }
 
+/** Quanto entrou (líquido) nas caixinhas em cada mês — usado no relatório
+    para mostrar o ritmo de quanto você tem guardado, mês a mês, dentro do
+    período que você escolheu (diferente da evolução geral, que sempre olha
+    os últimos 12 meses fixos). */
+function economizadoPorMes(d, meses) {
+  const caixinhaIds = new Set((d.contas || []).filter((c) => c.tipo === "caixinha").map((c) => c.id));
+  return meses.map((mes) => {
+    const doMes = (d.lancamentos || []).filter((l) =>
+      l.tipo === "transferencia" && l.status === "pago" && ym(l.pagamento || l.vencimento) === mes);
+    const entrou = doMes.filter((l) => caixinhaIds.has(l.destinoId)).reduce((s, l) => s + emC(l.valor), 0);
+    const saiu = doMes.filter((l) => caixinhaIds.has(l.contaId)).reduce((s, l) => s + emC(l.valor), 0);
+    return { mes, valor: +((entrou - saiu) / 100).toFixed(2) };
+  });
+}
+
+/** Soma quanto por mês seria preciso guardar, somando todas as caixinhas que
+    têm meta E prazo definidos — o "ritmo combinado" usado como referência
+    no gráfico de economia do relatório. Zero se nenhuma caixinha tem prazo. */
+function metaMensalCombinada(d) {
+  const hoje = today();
+  return (d.contas || []).filter((c) => c.tipo === "caixinha" && c.meta > 0 && c.prazo)
+    .reduce((s, c) => s + (progressoCaixinha(d, c, hoje).precisaPorMes || 0), 0);
+}
+
+/** Mediana de quanto foi guardado por mês, olhando o histórico inteiro —
+    não só o período do relatório. Serve de referência mais estável que a
+    média, que uma cobrança grande de um mês só já distorce. */
+function medianaGuardadoHistorico(d) {
+  const meses = mesesComMovimento(d, 240);
+  const valores = economizadoPorMes(d, meses).map((p) => p.valor).sort((a, b) => a - b);
+  if (!valores.length) return 0;
+  const meio = Math.floor(valores.length / 2);
+  return valores.length % 2 ? valores[meio] : (valores[meio - 1] + valores[meio]) / 2;
+}
+
 /* ============================================================ relatório */
 /* Monta um documento independente com o resumo do mês. Serve para imprimir,
    salvar em PDF ou guardar como arquivo — inclusive onde o navegador não
    oferece impressão, como o app instalado no iPhone. */
 
-function relatorioHTML({ rotulo, resumo, linhaTempo, contas, panorama, secoes }) {
+/** Barras do quanto foi guardado em cada mês, mais: a linha do acumulado
+    de verdade (com o valor escrito em cada ponto), a meta acumulada (se
+    alguma caixinha tiver meta com prazo), e duas linhas de referência
+    horizontais — a média do período e a mediana do histórico inteiro.
+    SVG puro, mais uma tabela com os valores de cada mês. */
+function graficoEconomiaSVG(economia, metaMensal, media, mediana) {
+  const n = economia.length;
+  const acumulado = []; let corrida = 0;
+  for (const p of economia) { corrida += p.valor; acumulado.push(+corrida.toFixed(2)); }
+  const meta = metaMensal > 0 ? economia.map((_, i) => +(metaMensal * (i + 1)).toFixed(2)) : null;
+
+  const todos = [0, ...economia.map((p) => p.valor), ...acumulado, ...(meta || []), media, mediana];
+  const maxV = Math.max(...todos), minV = Math.min(...todos);
+  const L = 52, R = 14, T = 14, B = 34, larg = 620, alt = 280;
+  const areaL = larg - L - R, areaA = alt - T - B;
+  const span = (maxV - minV) || 1;
+  const y = (v) => T + areaA - ((v - minV) / span) * areaA;
+
+  const lg = areaL / n;
+  const xCentro = (i) => L + i * lg + lg / 2;
+  const largBarra = Math.min(26, lg * 0.5);
+
+  const passo = (() => { const b = span / 4, e = Math.pow(10, Math.floor(Math.log10(b || 1))); return Math.ceil(b / e) * e || 1; })();
+  const linhasEixo = [];
+  for (let v = Math.ceil(minV / passo) * passo; v <= maxV; v += passo) linhasEixo.push(Math.round(v * 100) / 100);
+
+  const rotuloValor = (v) => Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "k" : brl(v).replace("R$ ", "").replace(",00", "");
+
+  const barras = economia.map((p, i) => {
+    const x = xCentro(i) - largBarra / 2;
+    const y1 = y(Math.max(0, p.valor)), y2 = y(Math.min(0, p.valor));
+    const cor = p.valor >= 0 ? "#0E7C61" : "#C42B5C";
+    return `<rect x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${largBarra}" height="${Math.max(1, y2 - y1).toFixed(1)}" rx="2" fill="${cor}" opacity="0.55" />`;
+  }).join("");
+
+  const linha = (pontos, cor, tracejado, comRotulo) => {
+    const dAttr = pontos.map((v, i) => `${i ? "L" : "M"}${xCentro(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+    return `<path d="${dAttr}" fill="none" stroke="${cor}" stroke-width="2.5"${tracejado ? ` stroke-dasharray="${tracejado}"` : ""} />` +
+      pontos.map((v, i) => `<circle cx="${xCentro(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3" fill="${cor}" />`
+        + (comRotulo ? `<text x="${xCentro(i).toFixed(1)}" y="${(y(v) - 8).toFixed(1)}" text-anchor="middle" style="font-size:8px;fill:${cor}">${rotuloValor(v)}</text>` : "")).join("");
+  };
+
+  const linhaRef = (v, cor, tracejado) =>
+    `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${larg - R}" y2="${y(v).toFixed(1)}" stroke="${cor}" stroke-width="1.5" stroke-dasharray="${tracejado}" />`;
+
+  const rotulos = economia.map((p, i) =>
+    `<text x="${xCentro(i).toFixed(1)}" y="${alt - B + 16}" text-anchor="middle" style="font-size:10px;fill:#727892">${mesCurto(p.mes)}</text>`).join("");
+
+  const grade = linhasEixo.map((v) => `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${larg - R}" y2="${y(v).toFixed(1)}" stroke="#EDEFF5" stroke-width="1" />
+    <text x="${L - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" style="font-size:9px;fill:#9AA0B4">${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "k" : v}</text>`).join("");
+
+  const eixoZero = minV < 0 && maxV > 0
+    ? `<line x1="${L}" y1="${y(0).toFixed(1)}" x2="${larg - R}" y2="${y(0).toFixed(1)}" stroke="#D3D7E3" stroke-width="1.2" />` : "";
+
+  const tabela = `<table><thead><tr><th>Mês</th><th class="n">Guardado</th><th class="n">Acumulado</th></tr></thead><tbody>` +
+    economia.map((p, i) => `<tr><td>${mesLabel(p.mes)}</td>
+      <td class="n" style="color:${p.valor >= 0 ? "#0E7C61" : "#C42B5C"}">${brl(p.valor)}</td>
+      <td class="n">${brl(acumulado[i])}</td></tr>`).join("") + `</tbody></table>`;
+
+  return `<svg viewBox="0 0 ${larg} ${alt}" width="100%" style="max-width:620px;display:block">
+    ${grade}${eixoZero}${barras}
+    ${linhaRef(media, "#0E9488", "3 3")}
+    ${linhaRef(mediana, "#8A3FBF", "1 4")}
+    ${linha(acumulado, "#3B3FA8", null, true)}
+    ${meta ? linha(meta, "#B26A00", "5 4", false) : ""}
+    ${rotulos}
+  </svg>
+  <div class="legenda" style="margin-top:8px;flex-direction:row;flex-wrap:wrap;gap:14px">
+    <div class="leg-item"><span class="dot" style="background:#0E7C61"></span>Guardado no mês</div>
+    <div class="leg-item"><span class="dot" style="background:#3B3FA8"></span>Acumulado</div>
+    ${meta ? `<div class="leg-item"><span class="dot" style="background:#B26A00"></span>Meta acumulada</div>` : ""}
+    <div class="leg-item"><span class="dot" style="background:#0E9488"></span>Média do período (${brl(media)})</div>
+    <div class="leg-item"><span class="dot" style="background:#8A3FBF"></span>Mediana histórica (${brl(mediana)})</div>
+  </div>
+  <div style="margin-top:14px">${tabela}</div>`;
+}
+
+function relatorioHTML({ rotulo, resumo, linhaTempo, economia, metaMensal, medianaHistorica, contas, panorama, secoes }) {
   const esc = (t) => String(t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const linha = (rot, val, cor) =>
     `<tr><td>${esc(rot)}</td><td class="n"${cor ? ` style="color:${cor}"` : ""}>${esc(brl(val))}</td></tr>`;
@@ -854,6 +966,15 @@ function relatorioHTML({ rotulo, resumo, linhaTempo, contas, panorama, secoes })
         <td class="n">${esc(brl(p.guardado))}</td><td class="n">${esc(brl(p.investido))}</td>
         <td class="n"><b>${esc(brl(p.total))}</b></td></tr>`).join("") + `</tbody></table>` : "";
 
+  const secEconomia = secoes.economia && economia.length >= 2 && economia.some((p) => p.valor !== 0)
+    ? (() => {
+        const total = economia.reduce((s, p) => s + p.valor, 0);
+        const media = +(total / economia.length).toFixed(2);
+        return `<h2>Quanto você guardou por mês</h2>
+          <p class="s" style="margin-bottom:10px">Total guardado no período: <b style="color:#141824">${esc(brl(total))}</b></p>
+          ${graficoEconomiaSVG(economia, metaMensal, media, medianaHistorica)}`;
+      })() : "";
+
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>caderneta — ${esc(rotulo)}</title>
@@ -881,6 +1002,8 @@ function relatorioHTML({ rotulo, resumo, linhaTempo, contas, panorama, secoes })
   .legenda { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
   .leg-item { display: flex; align-items: center; gap: 6px; }
   .leg-item b { margin-left: auto; padding-left: 14px; font-variant-numeric: tabular-nums; }
+  .barra-mini { background: #EDEFF5; border-radius: 4px; height: 8px; width: 100%; min-width: 80px; overflow: hidden; }
+  .barra-mini > div { height: 100%; border-radius: 4px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .rodape { margin-top: 34px; color: #9AA0B4; font-size: 11px; border-top: 1px solid #EDEFF5; padding-top: 10px; }
   .barra { position: fixed; left: 0; right: 0; bottom: 0; background: #141824; color: #fff;
@@ -905,6 +1028,7 @@ ${secPanorama}
 ${secComparacao}
 ${secMetas}
 ${secEvolucao}
+${secEconomia}
 
 <p class="rodape">Relatório gerado pela sua caderneta. Os valores refletem os lançamentos marcados como pagos ou recebidos.</p>
 </div>
@@ -1197,18 +1321,38 @@ function panorama(d, mes) {
  * se fecha depois (ex.: fecha 27, vence 3), foi no mês anterior.
  */
 function fechamentoDaFatura(cartao, vencimento) {
-  let [a, m] = vencimento.split("-").map(Number);
-  if (cartao.fecha >= cartao.vence) { m -= 1; if (m === 0) { m = 12; a -= 1; } }
+  let [a, m, dia] = vencimento.split("-").map(Number);
+  // se a compra aconteceu depois do dia de fechamento deste mês, ela já
+  // pertence à fatura que fecha no mês seguinte — é a comparação que
+  // importa, não uma relação genérica entre fechamento e vencimento do cartão
+  if (dia > cartao.fecha) { m += 1; if (m === 13) { m = 1; a += 1; } }
   return `${a}-${String(m).padStart(2, "0")}-${String(cartao.fecha).padStart(2, "0")}`;
+}
+
+/** O dia em que a FATURA vence, não a compra — é sempre esta a data que
+    deve aparecer para o usuário numa compra no crédito. Uma compra do dia
+    19 não "vence" no dia 19: ela entra na fatura que fecha depois dela, e
+    essa fatura tem o próprio dia de vencimento, igual para todas as
+    compras que estiverem dentro dela. */
+function vencimentoDaFatura(cartao, dataCompra) {
+  const fech = fechamentoDaFatura(cartao, dataCompra);
+  let [a, m] = fech.split("-").map(Number);
+  if (cartao.vence < cartao.fecha) { m += 1; if (m === 13) { m = 1; a += 1; } }
+  return `${a}-${String(m).padStart(2, "0")}-${String(cartao.vence).padStart(2, "0")}`;
 }
 
 /** Separa as compras de um cartão entre a fatura já fechada e a que ainda roda. */
 function faturasDoCartao(cartao, pendentes, hoje) {
   const minhas = pendentes.filter((l) => l.cartaoId === cartao.id);
   const fechada = minhas.filter((l) => fechamentoDaFatura(cartao, l.vencimento) <= hoje);
-  const aberta = minhas.filter((l) => fechamentoDaFatura(cartao, l.vencimento) > hoje);
-  const proximoFecha = aberta.length
-    ? fechamentoDaFatura(cartao, aberta.map((l) => l.vencimento).sort()[0]) : null;
+  // a fatura "em curso" é sempre a que fecha em seguida, contada a partir
+  // de hoje pelo calendário do cartão — mesmo que ainda não tenha nenhuma
+  // compra dentro dela. Antes, isto dependia de já existir alguma compra
+  // futura nos dados: se a próxima compra encontrada fosse de um ciclo
+  // mais além (por exemplo, uma conta fixa que só cobra depois do dia de
+  // fechamento), a fatura em curso pulava um mês inteiro à toa.
+  const proximoFecha = fechamentoDaFatura(cartao, hoje);
+  const aberta = minhas.filter((l) => fechamentoDaFatura(cartao, l.vencimento) === proximoFecha);
   return { fechada, aberta, proximoFecha,
     totalFechada: somaC(fechada),
     totalAberta: somaC(aberta),
@@ -1224,9 +1368,13 @@ function dividirEmParcelas(valor, n) {
 }
 
 /** O que cada pessoa deve a você, agrupado por nome. */
-function cobrancasPorPessoa(lancamentos) {
+function cobrancasPorPessoa(lancamentos, hoje) {
   const m = {};
-  for (const l of lancamentos) if (ehACobrar(l)) (m[l.deQuem] ||= []).push(l);
+  // só entra o que já é uma dívida de verdade: já foi pago, ou já venceu.
+  // Sem isto, uma conta fixa marcada como gasto de terceiro empilhava anos
+  // de cobranças futuras que ainda nem aconteceram.
+  for (const l of lancamentos)
+    if (ehACobrar(l) && (l.status === "pago" || l.vencimento <= hoje)) (m[l.deQuem] ||= []).push(l);
   return Object.entries(m)
     .map(([quem, ls]) => [quem, ls, somaC(ls)])
     .sort((a, b) => b[2] - a[2])
@@ -1401,7 +1549,7 @@ function Aplicacao() {
   const flash = (m) => {
     clearTimeout(relogioToast.current);
     setToast({ msg: m });
-    relogioToast.current = setTimeout(() => setToast(null), 2200);
+    relogioToast.current = setTimeout(() => setToast(null), 3200);
   };
 
   /**
@@ -1549,7 +1697,25 @@ function Aplicacao() {
     comDesfazer(`${alvo.length} cobrança(s) atualizadas para ${brl(novoValor)}`, () => upVarios(alvo, { valor: novoValor }));
   };
 
-  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
+  /** Move o dia de vencimento das pendentes, mantendo o mês de cada uma —
+      só ajusta se aquele mês for curto demais para o novo dia (ex: dia 31
+      em fevereiro vira 28). */
+  const atualizarDiaPendentes = (recId, novoDia) => {
+    const alvo = d.lancamentos.filter((l) => l.recId === recId && l.status === "pendente");
+    if (!alvo.length) { flash("Não há cobranças pendentes desta conta fixa"); return; }
+    comDesfazer(`${alvo.length} cobrança(s) movidas para o dia ${novoDia}`, () => setD((atual) => ({
+      ...atual,
+      lancamentos: atual.lancamentos.map((l) => {
+        if (!alvo.some((a) => a.id === l.id)) return l;
+        const [ano, mes] = l.vencimento.split("-");
+        const ultimoDia = new Date(+ano, +mes, 0).getDate();
+        const dia = Math.min(novoDia, ultimoDia);
+        return { ...l, vencimento: `${ano}-${mes}-${String(dia).padStart(2, "0")}`, editadoEm: new Date().toISOString() };
+      }),
+    })));
+  };
+
+  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M };
 
@@ -1627,8 +1793,8 @@ function Aplicacao() {
 
       {toast && (
         <div style={{ background: C.ink, color: "#fff" }}
-          className="fixed bottom-28 md:bottom-6 left-1/2 z-40 -translate-x-1/2 flex items-center gap-3 pl-4 pr-2 py-2 rounded-full text-sm shadow-lg max-w-[92vw]">
-          <span className="truncate">{toast.msg}</span>
+          className="fixed bottom-28 md:bottom-6 left-1/2 z-[60] -translate-x-1/2 flex items-center gap-3 pl-4 pr-2 py-2 rounded-full text-sm shadow-lg max-w-[92vw]">
+          <span className="[overflow-wrap:anywhere]">{toast.msg}</span>
           {toast.desfazer && (
             <button onClick={toast.desfazer} style={{ color: "#8FD9C4" }}
               className="shrink-0 font-medium px-2 py-0.5 rounded-full">desfazer</button>
@@ -1887,20 +2053,29 @@ function Barra({ disponivel, comprometidoMes, comprometidoGeral, totalGuardado, 
    onde fica a vírgula, e nunca dá para digitar um valor mal formado. */
 function CampoDinheiro({ centavos, onChange, cor, onEnter, autoFocus }) {
   const texto = (centavos / 100).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const ref = useRef(null);
 
   const digitar = (e) => {
     const so = e.target.value.replace(/\D/g, "").slice(0, 11);   // teto: R$ 999.999.999,99
     onChange(so === "" ? 0 : parseInt(so, 10));
   };
 
-  // no celular o cursor pode cair no meio; sempre manda para o fim
-  const aoFim = (e) => { const n = e.target.value.length; e.target.setSelectionRange(n, n); };
+  // roda depois de TODA renderização (sem lista de dependências), não só em
+  // eventos específicos de foco/clique/seleção — o navegador pode mexer no
+  // cursor em momentos que esses eventos não cobrem direito, então em vez
+  // de reagir a eles, fixamos o cursor no fim toda vez que o campo termina
+  // de se redesenhar, direto no elemento
+  useEffect(() => {
+    if (ref.current && document.activeElement === ref.current) {
+      const n = ref.current.value.length;
+      ref.current.setSelectionRange(n, n);
+    }
+  });
 
   return (
     <div className="flex items-baseline gap-2 mb-4">
       <span style={{ fontFamily: MONO, color: C.muted }} className="text-2xl">R$</span>
-      <input value={texto} onChange={digitar} onKeyDown={(e) => e.key === "Enter" && onEnter?.()}
-        onFocus={aoFim} onClick={aoFim} onSelect={aoFim}
+      <input ref={ref} value={texto} onChange={digitar} onKeyDown={(e) => e.key === "Enter" && onEnter?.()}
         inputMode="numeric" autoFocus={autoFocus} aria-label="Valor"
         style={{ fontFamily: MONO, color: centavos ? cor : C.muted, background: "transparent" }}
         className="text-4xl font-semibold w-full outline-none" />
@@ -2601,7 +2776,7 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
   const soma = (ls) => somaC(ls);
   const totFechadas = faturas.reduce((s, [, f]) => s + f.totalFechada, 0);
   const totAbertas = faturas.reduce((s, [, f]) => s + f.totalAberta, 0);
-  const cobrancas = useMemo(() => cobrancasPorPessoa(d.lancamentos), [d.lancamentos]);
+  const cobrancas = useMemo(() => cobrancasPorPessoa(d.lancamentos, hoje), [d.lancamentos, hoje]);
 
   /* quais blocos estão abertos. Fica em d.painelAgora: como não é uma das
      COLECOES, é guardado neste aparelho e não viaja para os outros. */
@@ -2712,7 +2887,7 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => compartilharCobranca(quem,
-                      `${ls.map((l) => `${l.nome} — ${brl(l.valor)}`).join("\n")}\nTotal: ${brl(soma(ls))}`)}
+                      `${ls.map((l) => `${l.nome}${l.parcelas ? ` (${l.parcela} de ${l.parcelas})` : ""} — ${brl(l.valor)}`).join("\n")}\nTotal: ${brl(soma(ls))}`)}
                     style={{ borderColor: C.line }} className="flex-1 rounded-lg border py-1.5 text-xs">Enviar lista</button>
                   <button onClick={() => comDesfazer(`${quem} acertou ${brl(soma(ls))}`, () => upVarios(ls, { reembolso: "recebido" }))}
                     style={{ background: C.tr }} className="flex-1 rounded-lg py-1.5 text-xs text-white">{quem} me pagou</button>
@@ -2765,7 +2940,15 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
   const meses = useMemo(() => {
     const m = {};
     lista.forEach((l) => { const k = ym(l.vencimento); (m[k] = m[k] || []).push(l); });
-    return Object.entries(m).sort((a, b) => a[0].localeCompare(b[0]));
+    const chaves = Object.keys(m).sort();
+    if (!chaves.length) return [];
+    // preenche os meses sem nenhuma cobrança — um mês vazio no meio do
+    // período tem que aparecer como barra zerada no gráfico, não sumir e
+    // quebrar a continuidade da linha do tempo
+    const cheio = [];
+    let k = chaves[0];
+    while (k <= chaves[chaves.length - 1]) { cheio.push(k); k = ym(addMonths(k + "-01", 1)); }
+    return cheio.map((k) => [k, m[k] || []]);
   }, [d, janela, de, ate]);
   const max = Math.max(1, ...meses.map(([, ls]) => ls.filter((l) => l.status === "pendente").reduce((s, l) => s + emC(l.valor), 0) / 100));
 
@@ -2908,7 +3091,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
 /* ============================================================== guardado */
 function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, totalInvestido, flash, verConta }) {
   const [mov, setMov] = useState(null);
-  const [v, setV] = useState("");
+  const [vCents, setVCents] = useState(0);
   const [origem, setOrigem] = useState(null);
   const liquidas = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
   // se nada foi escolhido ainda, ou a escolha de antes não existe mais
@@ -2916,13 +3099,13 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
   const origemEfetiva = liquidas.some((c) => c.id === origem) ? origem : liquidas[0]?.id;
 
   const transferir = (destinoId, sentido) => {
-    const n = num(v); if (n <= 0) return;
+    const n = vCents / 100; if (n <= 0) return;
     if (!origemEfetiva) { flash("Cadastre uma conta de banco ou espécie primeiro"); return; }
     const de = sentido > 0 ? origemEfetiva : destinoId, para = sentido > 0 ? destinoId : origemEfetiva;
     setD((atual) => ({ ...atual, lancamentos: [{ id: uid(), tipo: "transferencia", nome: sentido > 0 ? "Guardei" : "Retirei",
       valor: n, forma: "Pix", contaId: de, destinoId: para, vencimento: today(), pagamento: today(),
       status: "pago", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
-    setMov(null); setV(""); flash(sentido > 0 ? "Guardado" : "Retirado");
+    setMov(null); setVCents(0); flash(sentido > 0 ? "Guardado" : "Retirado");
   };
 
   const Secao = ({ titulo, contas, total, cor }) => (
@@ -2942,7 +3125,7 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
                 {c.objetivo && <div style={{ color: C.muted }} className="text-xs">{c.objetivo}</div>}</div>
               <div className="flex items-center gap-3">
                 <span onClick={() => verConta(c.id)} style={{ fontFamily: MONO }} className="font-semibold cursor-pointer">{brl(saldoConta(c.id))}</span>
-                <button onClick={() => setMov(mov === c.id ? null : c.id)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">mover</button>
+                <button onClick={() => setMov(c.id)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">mover</button>
               </div>
             </div>
             {(() => {
@@ -2980,29 +3163,50 @@ function Guardado({ d, setD, guardadas, investidas, saldoConta, totalGuardado, t
               );
             })()}
 
-            {mov === c.id && (
-              <div className="mt-3">
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {liquidas.map((o) => <Chip key={o.id} ativo={origemEfetiva === o.id} cor={C.tr} onClick={() => setOrigem(o.id)}>{o.nome}</Chip>)}
-                </div>
-                <div className="flex gap-2">
-                  <input value={v} onChange={(e) => setV(e.target.value)} inputMode="decimal" placeholder="0,00"
-                    style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="flex-1 rounded-lg border px-3 py-2 text-sm outline-none" />
-                  <button onClick={() => transferir(c.id, 1)} style={{ background: C.tr, color: "#fff" }} className="px-3 rounded-lg text-sm">Guardar</button>
-                  <button onClick={() => transferir(c.id, -1)} style={{ background: C.ink, color: "#fff" }} className="px-3 rounded-lg text-sm">Retirar</button>
-                </div>
-              </div>
-            )}
           </div>
         ))}
       </div>
     </div>
   );
 
+  const contaMov = mov ? [...guardadas, ...investidas].find((c) => c.id === mov) : null;
+
   return (<>
     <Secao titulo="Caixinhas" contas={guardadas} total={totalGuardado} cor={C.saved} />
     <Secao titulo="Investimentos" contas={investidas} total={totalInvestido} cor={C.inv} />
+    {contaMov && (
+      <MoverDinheiro conta={contaMov} liquidas={liquidas} origemEfetiva={origemEfetiva} setOrigem={setOrigem}
+        vCents={vCents} setVCents={setVCents} transferir={transferir}
+        onClose={() => { setMov(null); setVCents(0); }} />
+    )}
   </>);
+}
+
+/** Painel separado para guardar/retirar dinheiro de uma caixinha — igual ao
+    de "novo lançamento", fora da tela normal, com o campo de valor grande.
+    Existe porque o campo compacto embutido no cartão da caixinha, mesmo
+    corrigido, ainda competia por foco com o resto da tela ao seu redor. */
+function MoverDinheiro({ conta, liquidas, origemEfetiva, setOrigem, vCents, setVCents, transferir, onClose }) {
+  return (
+    <Painel titulo={`Mover · ${conta.nome}`} onClose={onClose}
+      rodape={
+        <div className="flex gap-2">
+          <button onClick={() => transferir(conta.id, 1)} disabled={vCents <= 0}
+            style={{ background: vCents > 0 ? C.tr : C.line, color: vCents > 0 ? "#fff" : C.muted }}
+            className="flex-1 rounded-xl py-2.5 text-sm font-medium transition-transform active:scale-[0.98]">Guardar</button>
+          <button onClick={() => transferir(conta.id, -1)} disabled={vCents <= 0}
+            style={{ background: vCents > 0 ? C.ink : C.line, color: vCents > 0 ? "#fff" : C.muted }}
+            className="flex-1 rounded-xl py-2.5 text-sm font-medium transition-transform active:scale-[0.98]">Retirar</button>
+        </div>
+      }>
+      <Rotulo>De qual conta sai, ou para qual volta</Rotulo>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {liquidas.map((o) => <Chip key={o.id} ativo={origemEfetiva === o.id} cor={C.tr} onClick={() => setOrigem(o.id)}>{o.nome}</Chip>)}
+      </div>
+      <CampoDinheiro centavos={vCents} onChange={setVCents} cor={C.tr}
+        onEnter={() => vCents > 0 && transferir(conta.id, 1)} autoFocus />
+    </Painel>
+  );
 }
 
 /* =========================================================== relatórios */
@@ -3014,7 +3218,7 @@ function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
   const [de, setDe] = useState(periodoInicial.de);
   const [ate, setAte] = useState(periodoInicial.ate);
   const [secoes, setSecoes] = useState({
-    resumo: true, grafico: true, panorama: true, comparacao: true, metas: true, evolucao: true,
+    resumo: true, grafico: true, panorama: true, comparacao: true, metas: true, evolucao: true, economia: true,
   });
 
   const periodo = useMemo(() => {
@@ -3036,6 +3240,7 @@ function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
     ["comparacao", "Comparação com o período anterior", "Cada categoria, antes e agora"],
     ["metas", "Metas das caixinhas", "Progresso e previsão de cada meta que você definiu"],
     ["evolucao", "Evolução do patrimônio", "Como o total cresceu nos últimos 12 meses"],
+    ["economia", "Quanto você guardou por mês", "Ritmo de economia mês a mês, dentro do período escolhido"],
   ];
 
   const gerar = () => {
@@ -3044,7 +3249,10 @@ function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
     const linhaTempo = evolucao(d, mesesComMovimento(d, 12));
     const contas = d.contas.filter((c) => c.tipo === "caixinha" || c.tipo === "investimento")
       .map((c) => ({ ...c, ...progressoCaixinha(d, c) }));
-    const html = relatorioHTML({ rotulo, resumo, linhaTempo, contas,
+    const economia = economizadoPorMes(d, periodo);
+    const metaMensal = metaMensalCombinada(d);
+    const medianaHistorica = medianaGuardadoHistorico(d);
+    const html = relatorioHTML({ rotulo, resumo, linhaTempo, economia, metaMensal, medianaHistorica, contas,
       panorama: panorama(d, periodo[periodo.length - 1]), secoes });
     exportarRelatorio(html, periodo[periodo.length - 1], flash);
     onClose();
@@ -3342,9 +3550,13 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
 }
 
 /* ================================================================ ajustes */
-function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes }) {
+function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aba, setAba] = useState("categorias");
-  const set = (patch) => setD((atual) => ({ ...atual, ...patch }));
+  const [salvoEm, setSalvoEm] = useState(null);
+  const set = (patch) => {
+    setD((atual) => ({ ...atual, ...patch }));
+    setSalvoEm(Date.now());
+  };
 
 
   const exportar = () => {
@@ -3374,7 +3586,10 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atua
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-6" style={{ background: "rgba(20,24,36,0.45)" }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: C.bg }} className="w-full max-w-lg rounded-t-2xl sm:rounded-2xl p-5 max-h-full overflow-auto">
         <div className="flex items-center justify-between mb-4">
-          <h2 style={{ fontFamily: DISPLAY }} className="text-xl font-bold">Ajustes</h2>
+          <div className="flex items-center gap-2">
+            <h2 style={{ fontFamily: DISPLAY }} className="text-xl font-bold">Ajustes</h2>
+            {salvoEm && <IndicadorSalvo em={salvoEm} />}
+          </div>
           <button onClick={onClose}><X size={20} /></button>
         </div>
         <div className="flex flex-wrap gap-2 mb-4">
@@ -3385,7 +3600,7 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atua
         {aba === "categorias" && <AbaCategorias d={d} set={set} flash={flash} />}
         {aba === "contas" && <AbaContas d={d} set={set} flash={flash} />}
         {aba === "cartoes" && <AbaCartoes d={d} set={set} flash={flash} />}
-        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} atualizarValorPendentes={atualizarValorPendentes} />}
+        {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} atualizarValorPendentes={atualizarValorPendentes} atualizarDiaPendentes={atualizarDiaPendentes} />}
         {aba === "dados" && (
           <>
             <Rotulo>Sincronia com a planilha</Rotulo>
@@ -3629,7 +3844,7 @@ function AbaCartoes({ d, set, flash }) {
   );
 }
 
-function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPendentes }) {
+function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aberta, setAberta] = useState(null);
   const [nova, setNova] = useState(false);
   const upR = (id, patch) => set({ recorrentes: d.recorrentes.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
@@ -3656,7 +3871,7 @@ function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPenden
         {d.recorrentes.map((r) => (
           <EditorRecorrente key={r.id} r={r} d={d} contasUso={contasUso}
             aberta={aberta === r.id} onToggle={() => setAberta(aberta === r.id ? null : r.id)}
-            upR={upR} flash={flash} atualizarValorPendentes={atualizarValorPendentes}
+            upR={upR} flash={flash} atualizarValorPendentes={atualizarValorPendentes} atualizarDiaPendentes={atualizarDiaPendentes}
             onApagar={() => { apagarRecorrencia(r.id); setAberta(null); }} />
         ))}
         {d.recorrentes.length === 0 && <Vazio>Nenhuma conta fixa cadastrada.</Vazio>}
@@ -3674,7 +3889,7 @@ function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPenden
 }
 
 /** Uma conta fixa: resumo fechado, todos os campos quando aberta. */
-function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, flash, atualizarValorPendentes }) {
+function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, flash, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [cents, setCents] = useState(Math.round((r.valor || 0) * 100));
   const [diaTxt, setDiaTxt] = useState(String(r.dia || 1));
   useEffect(() => { setCents(Math.round((r.valor || 0) * 100)); setDiaTxt(String(r.dia || 1)); }, [r.id]);
@@ -3721,14 +3936,18 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
                 style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
           </div>
           {pendentes > 0 && (
-            <div style={{ background: C.due + "14" }} className="rounded-xl p-2.5">
-              <p style={{ color: C.due }} className="text-xs mb-1.5">
-                Mudar o valor acima só vale para os meses ainda não gerados. Há {pendentes} cobrança(s)
-                já pendente(s) com o valor antigo.
+            <div style={{ background: C.due + "14" }} className="rounded-xl p-2.5 space-y-2">
+              <p style={{ color: C.due }} className="text-xs">
+                Mudar o valor ou o dia acima só vale para os meses ainda não gerados. Há {pendentes} cobrança(s)
+                já pendente(s) com os dados antigos.
               </p>
               <button onClick={() => atualizarValorPendentes(r.id, cents / 100)}
                 style={{ borderColor: C.due, color: C.due }} className="w-full rounded-lg border py-1.5 text-xs">
                 Atualizar as {pendentes} pendentes para {brl(cents / 100)}
+              </button>
+              <button onClick={() => atualizarDiaPendentes(r.id, Math.min(28, Math.max(1, parseInt(diaTxt, 10) || 1)))}
+                style={{ borderColor: C.due, color: C.due }} className="w-full rounded-lg border py-1.5 text-xs">
+                Mover as {pendentes} pendentes para o dia {diaTxt}
               </button>
             </div>
           )}
@@ -3825,19 +4044,25 @@ function Painel({ titulo, sub, onClose, children, rodape }) {
   if (meuId.current === null) meuId.current = {};   // identidade estável por instância
 
   useEffect(() => {
+    // só o primeiro painel da pilha trava a rolagem, e só o último destrava.
+    // Antes, cada painel guardava sua própria "foto" de como a rolagem
+    // estava antes dele — e quando dois fechavam juntos (a pergunta de
+    // escopo por cima do detalhe do lançamento), a ordem de fechamento podia
+    // deixar a rolagem travada para sempre, dependendo de qual painel
+    // "vencia" por último.
+    const eraVazia = pilhaPaineis.length === 0;
     pilhaPaineis.push(meuId.current);
+    if (eraVazia) document.body.style.overflow = "hidden";
+
     const esc = (e) => {
       // só o painel do topo da pilha reage — os de baixo ficam quietos
       if (e.key === "Escape" && pilhaPaineis[pilhaPaineis.length - 1] === meuId.current) onClose();
     };
     window.addEventListener("keydown", esc);
-    // trava a rolagem do fundo, senão a página corre atrás do painel no celular
-    const antes = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", esc);
       pilhaPaineis = pilhaPaineis.filter((id) => id !== meuId.current);
-      document.body.style.overflow = antes;
+      if (pilhaPaineis.length === 0) document.body.style.overflow = "";
     };
   }, [onClose]);
 
@@ -3921,6 +4146,10 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
   const contasUso = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
   const cat = l.catId ? catOf(l.catId) : null;
   const cartao = l.cartaoId ? cartaoOf(l.cartaoId) : null;
+  // no crédito, o que aparece é o vencimento da FATURA, não da compra — uma
+  // compra do dia 19 não "vence" no dia 19, ela entra na fatura que fecha
+  // depois dela, e é a fatura que tem uma data de vencimento única
+  const venceMostrar = cartao ? vencimentoDaFatura(cartao, l.vencimento) : l.vencimento;
   const subs = f.catId ? (catOf(f.catId)?.subs || []) : [];
   const irmas = l.grupo ? d.lancamentos.filter((x) => x.grupo === l.grupo) : [];
 
@@ -4155,7 +4384,7 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
                 ? (l.tipo === "entrada" ? `recebido em ${dm(l.pagamento)}` : `pago em ${dm(l.pagamento)}`)
                 : (l.tipo === "entrada" ? "a receber" : "pendente")}
           </Campo>
-          <Campo rot={l.status === "pago" ? "Previsto para" : "Vence em"}>{dm(l.vencimento)}</Campo>
+          <Campo rot={l.status === "pago" ? "Previsto para" : "Vence em"}>{dm(venceMostrar)}</Campo>
           {cat && <Campo rot="Categoria">{cat.nome}{l.subId && subOf(l.catId, l.subId) ? ` · ${subOf(l.catId, l.subId).nome}` : ""}</Campo>}
           {l.forma && <Campo rot="Forma">{l.forma}</Campo>}
           {cartao && <Campo rot="Cartão">{cartao.nome}{cartao.dono !== "eu" ? ` (de ${cartao.dono})` : ""} · fecha {cartao.fecha}, vence {cartao.vence}</Campo>}
@@ -4185,7 +4414,7 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
                 {irmas.slice().sort((a, b) => a.parcela - b.parcela).map((x) => (
                   <div key={x.id} style={{ background: x.id === l.id ? C.surface : "transparent", borderColor: C.line }}
                     className="flex items-center justify-between rounded-lg border px-3 py-1.5 text-xs">
-                    <span style={{ color: C.muted }}>{x.parcela}/{x.parcelas} · {dm(x.vencimento)}</span>
+                    <span style={{ color: C.muted }}>{x.parcela}/{x.parcelas} · {dm(x.cartaoId && cartaoOf(x.cartaoId) ? vencimentoDaFatura(cartaoOf(x.cartaoId), x.vencimento) : x.vencimento)}</span>
                     <span className="flex items-center gap-2">
                       <span style={{ fontFamily: MONO }}>{brl(x.valor).replace("R$ ", "")}</span>
                       <Tag cor={x.status === "pago" ? C.in : C.due}>{x.status === "pago" ? "paga" : "aberta"}</Tag>
@@ -4215,11 +4444,13 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
 }
 
 /** Movimentações de uma conta: o que entrou e o que saiu dela. */
-function MovimentosConta({ conta, d, onClose, saldoConta, contaOf, catOf, abrir }) {
+function MovimentosConta({ conta, d, onClose, saldoConta, contaOf, catOf, subOf, cartaoOf, abrir }) {
+  const [termo, setTermo] = useState("");
   const caixinha = conta.tipo === "caixinha" || conta.tipo === "investimento";
   const movs = d.lancamentos
     .filter((l) => l.contaId === conta.id || l.destinoId === conta.id)
     .sort((a, b) => (b.pagamento || b.vencimento).localeCompare(a.pagamento || a.vencimento));
+  const filtrados = buscar(movs, termo, { catOf, subOf, contaOf, cartaoOf });
 
   const sinal = (l) => (l.destinoId === conta.id ? 1 : l.tipo === "entrada" ? 1 : -1);
   const entrou = movs.filter((l) => sinal(l) > 0 && l.status === "pago").reduce((s, l) => s + emC(l.valor), 0) / 100;
@@ -4240,9 +4471,16 @@ function MovimentosConta({ conta, d, onClose, saldoConta, contaOf, catOf, abrir 
         </p>
       ) : <div className="mb-4" />}
 
-      {movs.length === 0 ? <Vazio>Nenhuma movimentação ainda.</Vazio> : (
+      {movs.length > 5 && (
+        <input value={termo} onChange={(e) => setTermo(e.target.value)} placeholder="Buscar nas movimentações…"
+          style={{ background: C.surface, borderColor: C.line, color: C.ink }}
+          className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-3" />
+      )}
+
+      {movs.length === 0 ? <Vazio>Nenhuma movimentação ainda.</Vazio>
+        : filtrados.length === 0 ? <Vazio>Nada encontrado para "{termo}".</Vazio> : (
         <div className="space-y-2">
-          {movs.map((l) => {
+          {filtrados.map((l) => {
             const s = sinal(l);
             const outra = l.tipo === "transferencia"
               ? contaOf(s > 0 ? l.contaId : l.destinoId)?.nome || "—"
@@ -4326,6 +4564,7 @@ function CampoInteiro({ valor, onValor, min = 1, max = 99, style, className }) {
   );
 }
 
+
 /** Um valor por mês, em barras. SVG puro, sem depender de biblioteca de
     gráficos — funciona idêntico aqui no chat e no site publicado, sem
     precisar de nenhuma troca no momento de gerar o site. */
@@ -4382,6 +4621,24 @@ const Chip = ({ ativo, cor, children, onClick }) => (
 
 const Vazio = ({ children }) => <p style={{ color: C.muted }} className="text-sm py-4">{children}</p>;
 
+/** Aparece por 1,5s toda vez que algo em Ajustes muda, confirmando que
+    gravou — sem precisar de um botão de "salvar" manual, já que tudo aqui
+    salva sozinho na hora. */
+function IndicadorSalvo({ em }) {
+  const [visivel, setVisivel] = useState(true);
+  useEffect(() => {
+    setVisivel(true);
+    const t = setTimeout(() => setVisivel(false), 1500);
+    return () => clearTimeout(t);
+  }, [em]);
+  if (!visivel) return null;
+  return (
+    <span style={{ color: C.in }} className="text-xs flex items-center gap-1">
+      <Check size={12} /> Salvo
+    </span>
+  );
+}
+
 const Tag = ({ cor, children }) => (
   <span style={{ background: cor + "1A", color: cor }} className="rounded-full px-1.5 py-0.5 text-xs font-medium">{children}</span>
 );
@@ -4389,13 +4646,16 @@ const Tag = ({ cor, children }) => (
 function Linha({ l, catOf, subOf, contaOf, cartaoOf, anulado, up, onPay, onUndo, onDel, onOpen, plano }) {
   const cat = l.catId ? catOf(l.catId) : { nome: "Transferência", cor: C.tr };
   const sub = l.catId && l.subId ? subOf(l.catId, l.subId) : null;
+  const cartaoDaCompra = l.cartaoId ? cartaoOf(l.cartaoId) : null;
+  // no crédito, o que aparece é o vencimento da FATURA, não da compra
+  const venceMostrar = cartaoDaCompra ? vencimentoDaFatura(cartaoDaCompra, l.vencimento) : l.vencimento;
   const via = l.cartaoId
-    ? `${cartaoOf(l.cartaoId)?.nome || "cartão"}`
+    ? `${cartaoDaCompra?.nome || "cartão"}`
     : l.tipo === "transferencia"
       ? `${contaOf(l.contaId)?.nome || "?"} → ${contaOf(l.destinoId)?.nome || "?"}`
       : contaOf(l.contaId)?.nome || "—";
   const cor = CORTIPO[l.tipo] || C.ink;
-  const pagoAdiantado = l.status === "pago" && l.pagamento && ym(l.pagamento) < ym(l.vencimento);
+  const pagoAdiantado = l.status === "pago" && l.pagamento && ym(l.pagamento) < ym(venceMostrar);
 
   return (
     <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2.5 flex items-center gap-3">
@@ -4414,7 +4674,7 @@ function Linha({ l, catOf, subOf, contaOf, cartaoOf, anulado, up, onPay, onUndo,
           {l.deQuem && l.reembolso === "recebido" && <Tag cor={C.in}>acertado</Tag>}
         </div>
         <div style={{ color: C.muted }} className="text-xs truncate">
-          {cat.nome}{sub ? ` · ${sub.nome}` : ""} · {l.forma ? `${l.forma} · ` : ""}{via} · {plano || !l.pagamento ? `vence ${dm(l.vencimento)}` : dm(l.pagamento)}
+          {cat.nome}{sub ? ` · ${sub.nome}` : ""} · {l.forma ? `${l.forma} · ` : ""}{via} · {plano || !l.pagamento ? `vence ${dm(venceMostrar)}` : dm(l.pagamento)}
           {l.obs ? ` · ${l.obs}` : ""}
         </div>
       </div>
