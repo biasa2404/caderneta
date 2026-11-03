@@ -1484,9 +1484,12 @@ function resumoCiclo(d, mes, hoje = today()) {
   // mês que já passou não reserva mais nada: o que não foi gasto, sobrou
   const reservadoLimites = mes < ym(hoje) ? 0 : somaC(limites, (x) => x.resta);
 
+  // planejados: gasto esperado do mês, sem data nem valor certo (Futuro → Planejados)
+  const planejados = (d.intencoes || []).filter((x) => x.quando === mes);
+  const planejado = mes < ym(hoje) ? 0 : somaC(planejados);
   const sai = g.fixas.total + g.guardar.total + g.cartao.total + g.outros.total;
-  const livre = +(g.entradas.total - sai - reservadoLimites).toFixed(2);
-  return { mes, ...g, limites, reservadoLimites, porCat, qtd, livre,
+  const livre = +(g.entradas.total - sai - reservadoLimites - planejado).toFixed(2);
+  return { mes, ...g, limites, reservadoLimites, porCat, qtd, livre, planejado, planejados,
     gastoVariavel: +(g.cartao.total + g.outros.total).toFixed(2) };
 }
 
@@ -1528,7 +1531,7 @@ function previsaoLivre(d, n = 6, hoje = today()) {
     if (i === 0) {
       return { mes, real: true, entrada: r.entradas.total, fixas: r.fixas.total, guardar: r.guardar.total,
         diaADia: +(r.gastoVariavel + r.reservadoLimites).toFixed(2), planejado,
-        livre: +(r.livre - planejado).toFixed(2), estimouEntrada: false };
+        livre: r.livre, estimouEntrada: false };
     }
     const parcelas = somaC([...r.cartao.itens, ...r.outros.itens].filter(certo));
     const conhecidos = semParcelas(r.cartao) + semParcelas(r.outros);
@@ -3261,6 +3264,8 @@ function Mes(props) {
       itens: r.outros.itens },
   ];
   const passou = mes < ym(hoje);
+  if (r.planejado) linhas.push({ k: "planejado", sinal: "−", nome: "Planejados (estimativa)", v: r.planejado, cor: C.due,
+    det: r.planejados.map((x) => x.nome).join(", ") });
   if (r.limites.length && !passou) linhas.push({ k: "limites", sinal: "−", nome: "Ainda cabe nos limites", v: r.reservadoLimites, cor: C.due,
     det: "reserva do que falta gastar nos limites" });
 
@@ -3537,10 +3542,12 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
     // a conta vem dos seus dados de verdade, nunca de um id fixo — sem isso,
     // a conta some silenciosamente se você não tiver uma com esse nome
     const contaPadrao = d.contas.find((c) => c.tipo === "banco" || c.tipo === "fisico")?.id;
+    // vira conta no mês planejado (hoje, se for este mês)
+    const venc = i.quando && i.quando > mesAtual() ? `${i.quando}-01` : today();
     setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id),
       lancamentos: [{ id: uid(), tipo: "saida", nome: i.nome, valor: i.valor, catId: "outros", forma: "Pix",
-        contaId: contaPadrao, vencimento: addMonths(today(), 1), pagamento: null, status: "pendente", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
-    flash("Virou conta prevista — ajuste a data em Mais detalhes");
+        contaId: contaPadrao, vencimento: venc, pagamento: null, status: "pendente", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
+    flash("Virou um gasto previsto. Toque nele para acertar valor, data e categoria");
   };
   const totIntencoes = somaC(d.intencoes || []);
 
@@ -3681,7 +3688,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
           <div key={i.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2.5 flex items-center gap-3">
             <span className="flex-1 text-sm">{i.nome}{i.quando && <span style={{ color: C.muted }} className="text-xs"> · {mesLabel(i.quando)}</span>}</span>
             <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
-            <button onClick={() => virarConta(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virar conta</button>
+            <button onClick={() => virarConta(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virou real</button>
             <button onClick={() => setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id) }))} style={{ color: C.muted }}><Trash2 size={14} /></button>
           </div>
         ))}
