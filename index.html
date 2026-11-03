@@ -1740,6 +1740,42 @@ function Aplicacao() {
     }
   };
 
+  /** O contrário: a planilha é a certa (ex.: você restaurou uma versão dela).
+      Joga fora o que está neste aparelho e fica exatamente com o que está lá. */
+  const baixarDaPlanilha = async () => {
+    const dados = dRef.current;
+    const url = dados?.sheetsUrl;
+    if (!url) { flash("A sincronia com a planilha não está ligada neste aparelho"); return false; }
+    if (!navigator.onLine) { flash("Sem internet. Tente de novo quando conectar."); return false; }
+    while (emCurso.current) await new Promise((ok) => setTimeout(ok, 300));
+    emCurso.current = true;
+    clearTimeout(timer.current);
+    setSync((x) => ({ ...x, estado: "enviando" }));
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ v: 4, segredo: dados.sheetsSegredo || "", desde: 0, mudancas: [] }) });
+      if (!r.ok) throw new Error("resposta " + r.status);
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.erro || "recusado");
+      const { estado: remoto } = aplicarMudancas({}, j.mudancas || []);
+      const soLocal = Object.fromEntries(SO_LOCAL.filter((k) => k in dados).map((k) => [k, dados[k]]));
+      const limpo = sanear({ ...soLocal, ...Object.fromEntries(COLECOES.map((c) => [c, remoto[c] || []])) });
+      // a base é o que veio da planilha: nada daqui é reenviado
+      baseSync.current = baseDe(limpo);
+      const final = gerar({ ...limpo, ateOnde: j.agora, v: ESQUEMA });
+      setD(final);
+      setSync({ estado: "ok", quando: Date.now(), trouxe: 0 });
+      flash(`Pronto: ${limpo.lancamentos.length} lançamentos baixados da planilha`);
+      return true;
+    } catch (e) {
+      setSync({ estado: "erro", quando: null, msg: e.message });
+      flash("Não deu para falar com a planilha: " + e.message);
+      return false;
+    } finally {
+      emCurso.current = false;
+    }
+  };
+
   /* busca novidades: ao voltar para o app, ao reconectar, e a cada minuto */
   useEffect(() => {
     if (!d?.sheetsUrl) return;
@@ -1940,7 +1976,7 @@ function Aplicacao() {
 
   const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
-    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha };
+    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha };
   const livreDoMes = resumoCiclo(d, M).livre;
   /* lembretes: ficam no topo até você fazer a operação ou fechar o aviso */
   const hojeL = today();
@@ -4299,9 +4335,98 @@ function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
   );
 }
 
-function Ajustes({ abaInicial, substituirPlanilha, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
+/** Separa o que voltou de um aparelho antigo: tudo que estava na cópia de antes
+    do "Começar do zero" e reapareceu é tirado; o que você lançou depois fica. */
+function DesfazerMistura({ d, flash, substituirPlanilha, setD, onClose }) {
+  const [antigo, setAntigo] = useState(null);
+  const [manteveFixas, setManteveFixas] = useState(false);
+  const [saldos, setSaldos] = useState({});
+  const ler = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const b = JSON.parse(r.result);
+        if (!Array.isArray(b.lancamentos)) throw new Error();
+        setAntigo(b);
+        setSaldos(Object.fromEntries(d.contas.map((c) => [c.id, String(c.saldoInicial ?? 0).replace(".", ",")])));
+      } catch { flash("Isto não parece uma cópia da caderneta"); }
+    };
+    r.readAsText(f);
+  };
+
+  const plano = useMemo(() => {
+    if (!antigo) return null;
+    const ids = (col) => new Set((antigo[col] || []).map((x) => x.id));
+    const velhosL = ids("lancamentos"), velhosR = ids("recorrentes"), velhosI = ids("intencoes"), velhosC = ids("cancelados");
+    const recorrentes = manteveFixas ? d.recorrentes : d.recorrentes.filter((r) => !velhosR.has(r.id));
+    const recFicam = new Set(recorrentes.map((r) => r.id));
+    const inicioMes = mesAtual() + "-01";
+    const lancamentos = d.lancamentos.filter((l) => {
+      if (!velhosL.has(l.id)) return !l.recId || recFicam.has(l.recId) || !String(l.id).startsWith("r_");
+      // com as fixas mantidas, as cobranças deste mês em diante são refeitas com o mesmo código: ficam
+      return manteveFixas && String(l.id).startsWith("r_") && recFicam.has(l.recId) && l.vencimento >= inicioMes;
+    });
+    const voltaram = d.contas.filter((c) => (antigo.contas || []).some((a) => a.id === c.id && +a.saldoInicial === +c.saldoInicial));
+    return { recorrentes, lancamentos,
+      intencoes: (d.intencoes || []).filter((x) => !velhosI.has(x.id)),
+      cancelados: (d.cancelados || []).filter((x) => !velhosC.has(x.id)),
+      saem: d.lancamentos.length - lancamentos.length, saemR: d.recorrentes.length - recorrentes.length,
+      ficam: lancamentos.length, voltaram };
+  }, [antigo, manteveFixas, d]);
+
+  const aplicar = async () => {
+    const contas = d.contas.map((c) => ({ ...c, saldoInicial: saldos[c.id] != null && saldos[c.id] !== "" ? num(saldos[c.id]) : c.saldoInicial }));
+    const novo = gerar({ ...d, contas, lancamentos: plano.lancamentos, recorrentes: plano.recorrentes, intencoes: plano.intencoes, cancelados: plano.cancelados });
+    if (d.sheetsUrl) { if (!(await substituirPlanilha(novo))) return; }
+    else setD(novo);
+    flash(`Separado: ${plano.saem} lançamentos antigos saíram`);
+    onClose();
+  };
+
+  return (
+    <Painel titulo="Desfazer mistura" onClose={onClose}
+      rodape={plano && <button onClick={aplicar} style={{ background: C.ink, color: "#fff" }} className="w-full rounded-xl py-3 text-sm font-medium">Tirar os antigos e corrigir a planilha</button>}>
+      <p style={{ color: C.muted }} className="text-sm mb-3">
+        Escolha o arquivo que o site baixou quando você tocou em "Começar do zero" (caderneta-AAAA-MM-DD.json, o mais antigo do dia).
+        Tudo que estava nele e reapareceu sai; o que você lançou depois fica.
+      </p>
+      <label style={{ background: C.surface, borderColor: C.line }} className="w-full rounded-xl border py-2.5 text-sm flex items-center justify-center gap-1.5 cursor-pointer mb-3">
+        <Upload size={15} /> {antigo ? "Outro arquivo" : "Escolher o arquivo antigo"}<input type="file" accept="application/json" onChange={ler} className="hidden" /></label>
+      <label className="flex items-center gap-2 text-sm mb-3">
+        <input type="checkbox" checked={manteveFixas} onChange={(e) => setManteveFixas(e.target.checked)} />
+        Quando zerei, marquei "manter as contas fixas"
+      </label>
+      {plano && (
+        <>
+          <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border p-3 text-sm mb-3">
+            <div>Saem <b>{plano.saem}</b> lançamentos e <b>{plano.saemR}</b> contas fixas antigas.</div>
+            <div>Ficam <b>{plano.ficam}</b> lançamentos.</div>
+          </div>
+          <Rotulo>Saldos de partida (de 31/10)</Rotulo>
+          <p style={{ color: C.muted }} className="text-xs mb-2">Os marcados voltaram ao valor antigo. Digite de novo o que você colocou ao zerar.</p>
+          <div className="space-y-2">
+            {d.contas.map((c) => {
+              const voltou = plano.voltaram.some((x) => x.id === c.id);
+              return (
+                <div key={c.id} style={{ background: C.surface, borderColor: voltou ? C.due : C.line }} className="rounded-xl border px-3 py-2 flex items-center gap-2">
+                  <span className="flex-1 text-sm">{c.nome}{voltou && <span style={{ color: C.due }} className="text-xs"> · valor antigo</span>}</span>
+                  <input value={saldos[c.id] ?? ""} onChange={(e) => setSaldos({ ...saldos, [c.id]: e.target.value })} inputMode="decimal" aria-label={`Saldo de ${c.nome}`}
+                    style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-28 rounded-lg border px-2 py-1.5 text-sm text-right outline-none" />
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Painel>
+  );
+}
+
+function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aba, setAba] = useState(abaInicial || "mes");
   const [zerando, setZerando] = useState(false);
+  const [separando, setSeparando] = useState(false);
   const [salvoEm, setSalvoEm] = useState(null);
   const set = (patch) => {
     setD((atual) => ({ ...atual, ...patch }));
@@ -4403,6 +4528,14 @@ function Ajustes({ abaInicial, substituirPlanilha, d, setD, onClose, flash, comD
                 <p style={{ color: C.muted }} className="text-xs mb-4">
                   O app já traz as novidades sozinho ao abrir e a cada minuto. Use isto só se desconfiar que faltou alguma coisa.
                 </p>
+                <BotaoConfirma onConfirm={() => baixarDaPlanilha()}
+                  pergunta="Trocar tudo deste aparelho pelo da planilha?" cor={C.out} estilo={{ borderColor: C.line }}
+                  className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
+                  <Download size={15} /> A planilha é a certa: baixar tudo
+                </BotaoConfirma>
+                <p style={{ color: C.muted }} className="text-xs mb-4">
+                  Troca o que está neste aparelho pelo que está na planilha. Use depois de restaurar uma versão da planilha.
+                </p>
                 <BotaoConfirma onConfirm={async () => { if (await substituirPlanilha()) flash("Pronto: este aparelho agora vale para todos"); }}
                   pergunta="Apagar na planilha o que não está aqui?" cor={C.out} estilo={{ borderColor: C.line }}
                   className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
@@ -4424,6 +4557,14 @@ function Ajustes({ abaInicial, substituirPlanilha, d, setD, onClose, flash, comD
             <p style={{ color: C.muted }} className="text-xs mt-3">
               O app sempre grava primeiro neste aparelho, por isso nunca trava esperando a internet.
             </p>
+
+            <Rotulo>Dados misturados?</Rotulo>
+            <button onClick={() => setSeparando(true)} style={{ background: C.surface, borderColor: C.line }}
+              className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
+              <RotateCcw size={15} /> Desfazer mistura com a cópia antiga
+            </button>
+            <p style={{ color: C.muted }} className="text-xs mb-4">Depois de um "Começar do zero", se coisas antigas voltaram de outro aparelho.</p>
+            {separando && <DesfazerMistura d={d} setD={setD} flash={flash} substituirPlanilha={substituirPlanilha} onClose={() => setSeparando(false)} />}
 
             <Rotulo>Começar do zero</Rotulo>
             <button onClick={() => setZerando(true)} style={{ background: C.surface, borderColor: C.out, color: C.out }}
