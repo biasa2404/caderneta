@@ -53,7 +53,7 @@
 <div id="raiz"><div id="carregando">Abrindo a caderneta…</div></div>
 
 <script type="text/babel" data-presets="react">
-const APP_BUILD = "2026-08-20 18:42";
+const APP_BUILD = "2026-11-03 mês de vida";
 
 /* =====================================================================
    caderneta — camada de compatibilidade
@@ -290,7 +290,7 @@ window.storage = (() => {
 const COLECOES = ["lancamentos", "contas", "cartoes", "categorias", "recorrentes", "intencoes", "cancelados"];
 
 /* Chaves que são configuração do aparelho, não dado compartilhado. */
-const SO_LOCAL = ["sheetsUrl", "sheetsSegredo", "ateOnde", "painelAgora", "v"];
+const SO_LOCAL = ["sheetsUrl", "sheetsSegredo", "ateOnde", "painelAgora", "diaVirada", "v"];
 
 /** JSON.stringify(obj) com as chaves sempre na mesma ordem (alfabética),
     em qualquer profundidade. Sem isso, dois objetos com o mesmo conteúdo mas
@@ -442,8 +442,9 @@ const addMonths = (s, n) => {
   const last = new Date(dt.getFullYear(), dt.getMonth() + 1, 0).getDate();
   return iso(new Date(dt.getFullYear(), dt.getMonth(), Math.min(d, last)));
 };
+/** "nov/2026" — sem o "de", que a letra maiúscula automática virava "Nov De 26" */
 const mesLabel = (k) => { const [y, m] = k.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "short", year: "2-digit" }).replace(".", ""); };
+  return `${new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "short" }).replace(".", "")}/${y}`; };
 /** só o mês, para caber no eixo do gráfico: "ago" */
 const mesCurto = (k) => { const [y, m] = k.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "short" }).replace(".", ""); };
@@ -564,7 +565,9 @@ function gerar(d, meses = 24) {
     let feitas = out.filter((l) => l.recId === r.id).length;
     for (let i = 0; i < meses; i++) {
       const venc = addMonths(`${base.slice(0, 7)}-${String(r.dia).padStart(2, "0")}`, i);
-      if (venc < base) continue;
+      // o mês corrente entra inteiro: uma conta fixa do dia 2 criada no dia 3
+      // tem que aparecer como "a pagar" deste mês, e não sumir até o mês que vem
+      if (ym(venc) < ym(base)) continue;
       if (r.fim?.tipo === "data" && r.fim.data && venc > r.fim.data) break;
       if (r.fim?.tipo === "vezes" && feitas >= r.fim.vezes) break;
       const src = `${r.id}#${ym(venc)}`;
@@ -1351,7 +1354,9 @@ function faturasDoCartao(cartao, pendentes, hoje) {
   // futura nos dados: se a próxima compra encontrada fosse de um ciclo
   // mais além (por exemplo, uma conta fixa que só cobra depois do dia de
   // fechamento), a fatura em curso pulava um mês inteiro à toa.
-  const proximoFecha = fechamentoDaFatura(cartao, hoje);
+  // no próprio dia do fechamento a fatura de hoje já fechou: a próxima é a do mês seguinte
+  let proximoFecha = fechamentoDaFatura(cartao, hoje);
+  if (proximoFecha <= hoje) proximoFecha = fechamentoDaFatura(cartao, addMonths(proximoFecha, 1));
   const aberta = minhas.filter((l) => fechamentoDaFatura(cartao, l.vencimento) === proximoFecha);
   return { fechada, aberta, proximoFecha,
     totalFechada: somaC(fechada),
@@ -1381,6 +1386,137 @@ function cobrancasPorPessoa(lancamentos, hoje) {
     .map(([quem, ls]) => [quem, ls]);
 }
 
+
+/* ======================================== o mês do jeito que você vive
+   O salário cai no fim do mês e paga o mês SEGUINTE. Por isso o app não
+   olha só o calendário: cada lançamento pertence a um "mês de vida".
+   - entrada recebida a partir do dia da virada (padrão 25) → mês seguinte
+   - compra no crédito → mês da COMPRA (o dinheiro é reservado na hora,
+     a fatura só acerta depois)
+   - o resto → mês em que foi pago (ou em que vence)
+   Um lançamento pode forçar o mês com o campo "ref". */
+const DIA_VIRADA_PADRAO = 25;
+const diaVirada = (d) => Math.min(31, Math.max(1, +d?.diaVirada || DIA_VIRADA_PADRAO));
+const mesSeguinte = (k) => ym(addMonths(k + "-01", 1));
+const mesAnterior = (k) => ym(addMonths(k + "-01", -1));
+const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const nomeMes = (k) => MESES[+k.slice(5, 7) - 1] || k;
+
+/** Caixinha que guarda o dinheiro de viver (ex.: "Salário"): mover para ela não é economizar. */
+const ehCaixinhaDeViver = (c) => !!c && (c.deViver ?? /sal[aá]rio/i.test(`${c.nome} ${c.objetivo || ""}`));
+
+const dataDoCiclo = (l) => (l.tipo === "saida" && l.cartaoId ? l.vencimento : (l.pagamento || l.vencimento));
+function cicloDe(l, dia) {
+  if (l.ref) return l.ref;
+  const data = dataDoCiclo(l);
+  if (!data) return "";
+  if (l.tipo === "entrada" && +data.slice(8, 10) >= dia) return mesSeguinte(ym(data));
+  return ym(data);
+}
+/** Mês em que uma entrada nova cairia, pela data escolhida. */
+const cicloDaEntrada = (data, dia) => (+data.slice(8, 10) >= dia ? mesSeguinte(ym(data)) : ym(data));
+
+/** Já aconteceu? Pago, ou compra no crédito com data já passada. */
+const aconteceu = (l, hoje) => l.status === "pago" || (!!l.cartaoId && l.vencimento <= hoje);
+
+/**
+ * A conta do mês, do jeito que você faz no papel:
+ * entrou − contas fixas − caixinhas − cartão − outros gastos − o que ainda cabe nos limites = livre.
+ */
+function resumoCiclo(d, mes, hoje = today()) {
+  const dia = diaVirada(d);
+  const contaDe = (id) => (d.contas || []).find((c) => c.id === id);
+  const liquida = (c) => !!c && (c.tipo === "banco" || c.tipo === "fisico" || ehCaixinhaDeViver(c));
+  const reserva = (c) => !!c && (c.tipo === "caixinha" || c.tipo === "investimento") && !ehCaixinhaDeViver(c);
+  const novo = () => ({ feito: 0, falta: 0, itens: [] });
+  const g = { entradas: novo(), fixas: novo(), guardar: novo(), cartao: novo(), outros: novo(), deOutros: novo() };
+  const porCat = {};
+  let qtd = 0;
+  for (const l of d.lancamentos || []) {
+    if (cicloDe(l, dia) !== mes) continue;
+    let alvo = null, v = emC(l.valor);
+    if (l.tipo === "entrada") alvo = g.entradas;
+    else if (l.tipo === "transferencia") {
+      const o = contaDe(l.contaId), p = contaDe(l.destinoId);
+      if (liquida(o) && reserva(p)) alvo = g.guardar;
+      else if (reserva(o) && liquida(p)) { alvo = g.guardar; v = -v; }
+      else continue;
+    } else {
+      if (ehAnulado(l)) continue;
+      if (ehAlheio(l)) alvo = g.deOutros;
+      else if (l.recId) alvo = g.fixas;
+      else if (l.cartaoId) alvo = g.cartao;
+      else alvo = g.outros;
+      if (alvo !== g.deOutros && l.catId) porCat[l.catId] = (porCat[l.catId] || 0) + v;
+    }
+    qtd++;
+    alvo[aconteceu(l, hoje) ? "feito" : "falta"] += v;
+    alvo.itens.push(l);
+  }
+  for (const k in g) { g[k].feito /= 100; g[k].falta /= 100; g[k].total = +(g[k].feito + g[k].falta).toFixed(2); }
+
+  const limites = (d.categorias || []).filter((c) => c.id !== "renda" && +c.orcamento > 0).map((c) => {
+    const gasto = (porCat[c.id] || 0) / 100;
+    return { id: c.id, nome: c.nome, cor: c.cor, limite: +c.orcamento, gasto, resta: Math.max(0, +(c.orcamento - gasto).toFixed(2)) };
+  }).sort((a, b) => b.gasto / b.limite - a.gasto / a.limite);
+  // mês que já passou não reserva mais nada: o que não foi gasto, sobrou
+  const reservadoLimites = mes < ym(hoje) ? 0 : somaC(limites, (x) => x.resta);
+
+  const sai = g.fixas.total + g.guardar.total + g.cartao.total + g.outros.total;
+  const livre = +(g.entradas.total - sai - reservadoLimites).toFixed(2);
+  return { mes, ...g, limites, reservadoLimites, porCat, qtd, livre,
+    gastoVariavel: +(g.cartao.total + g.outros.total).toFixed(2) };
+}
+
+/** Pendências de meses que já passaram: ou aconteceram e faltou marcar, ou não vão acontecer. */
+function pendentesAtrasados(d, mes, hoje = today()) {
+  const dia = diaVirada(d);
+  return (d.lancamentos || []).filter((l) => {
+    if (l.status !== "pendente") return false;
+    if (l.cartaoId) {   // no crédito, só atrasa depois que a fatura venceu
+      const c = (d.cartoes || []).find((x) => x.id === l.cartaoId);
+      return c ? vencimentoDaFatura(c, l.vencimento) < hoje : false;
+    }
+    return cicloDe(l, dia) < mes;
+  }).sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+}
+
+/**
+ * Quanto vai sobrar nos próximos meses. Usa o que já está lançado
+ * (contas fixas, parcelas, planejados) e, para o dia a dia, o maior entre
+ * a soma dos seus limites e a média do que você gastou nos últimos meses.
+ */
+function previsaoLivre(d, n = 6, hoje = today()) {
+  const atual = ym(hoje);
+  const passados = [1, 2, 3].map((i) => resumoCiclo(d, ym(addMonths(atual + "-01", -i)), hoje)).filter((r) => r.qtd > 0);
+  const media = (f) => (passados.length ? passados.reduce((s, r) => s + f(r), 0) / passados.length : 0);
+  const semParcelas = (g) => somaC(g.itens.filter((l) => !l.grupo));
+  const mediaEntrada = +media((r) => r.entradas.total).toFixed(2);
+  const mediaDiaADia = +media((r) => semParcelas(r.cartao) + semParcelas(r.outros)).toFixed(2);
+  const mediaGuardar = +media((r) => r.guardar.total).toFixed(2);
+  const somaLimites = somaC((d.categorias || []).filter((c) => c.id !== "renda"), (c) => +c.orcamento || 0);
+  const baseDiaADia = somaLimites > 0 ? Math.max(somaLimites, 0) : mediaDiaADia;
+
+  return Array.from({ length: n }, (_, i) => {
+    const mes = ym(addMonths(atual + "-01", i));
+    const r = resumoCiclo(d, mes, hoje);
+    const planejado = somaC((d.intencoes || []).filter((x) => x.quando === mes));
+    if (i === 0) {
+      return { mes, real: true, entrada: r.entradas.total, fixas: r.fixas.total, guardar: r.guardar.total,
+        diaADia: +(r.gastoVariavel + r.reservadoLimites).toFixed(2), planejado,
+        livre: +(r.livre - planejado).toFixed(2), estimouEntrada: false };
+    }
+    const parcelas = somaC([...r.cartao.itens, ...r.outros.itens].filter((l) => l.grupo));
+    const conhecidos = semParcelas(r.cartao) + semParcelas(r.outros);
+    const entrada = r.entradas.total || mediaEntrada;
+    const guardar = r.guardar.total || mediaGuardar;
+    const diaADia = +(parcelas + Math.max(conhecidos, baseDiaADia)).toFixed(2);
+    return { mes, real: false, entrada, fixas: r.fixas.total, guardar, diaADia, planejado,
+      livre: +(entrada - r.fixas.total - guardar - diaADia - planejado).toFixed(2),
+      estimouEntrada: !r.entradas.total };
+  }).map((x) => ({ ...x, base: { mediaEntrada, mediaDiaADia, somaLimites, mediaGuardar, meses: passados.length } }));
+}
+
 /* ================================================================== app */
 function App() {
   return <Barreira><Aplicacao /></Barreira>;
@@ -1388,7 +1524,7 @@ function App() {
 
 function Aplicacao() {
   const [d, setD] = useState(null);
-  const [tab, setTab] = useState("lancar");
+  const [tab, setTab] = useState("mes");
   const [cfg, setCfg] = useState(false);
   const [toast, setToast] = useState(null);
   const [sync, setSync] = useState({ estado: "local", quando: null });
@@ -1717,10 +1853,11 @@ function Aplicacao() {
 
   const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
-    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M };
+    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: () => setCfg(true) };
+  const livreDoMes = resumoCiclo(d, M).livre;
 
   const tabs = [
-    { id: "lancar", nome: "Lançar", icon: Plus }, { id: "agora", nome: "Agora", icon: Wallet },
+    { id: "mes", nome: "Mês", icon: Wallet }, { id: "lancar", nome: "Extrato", icon: Repeat },
     { id: "futuro", nome: "Futuro", icon: CalendarClock }, { id: "guardado", nome: "Guardado", icon: PiggyBank },
     { id: "relatorio", nome: "Relatórios", icon: PieIcon },
   ];
@@ -1747,9 +1884,17 @@ function Aplicacao() {
         </header>
 
         <main className="flex-1 p-4 pb-28 md:pb-8 md:pt-6">
-          <Barra {...ctx} sync={sync} verSync={() => setDetalheSync(true)} />
+          <div className="flex items-center justify-between gap-2 mb-3">
+            {tab !== "mes" ? (
+              <button onClick={() => setTab("mes")} style={{ background: C.surface, borderColor: C.line }} className="rounded-full border px-3 py-1.5 text-xs text-left">
+                <span style={{ color: C.muted }}>Livre em {nomeMes(M)} </span>
+                <b style={{ fontFamily: MONO, color: livreDoMes < 0 ? C.out : C.in }}>{brl(livreDoMes)}</b>
+              </button>
+            ) : <span />}
+            <SyncBadge sync={sync} onAbrir={() => setDetalheSync(true)} />
+          </div>
+          {tab === "mes" && <Mes {...ctx} />}
           {tab === "lancar" && <Lancar {...ctx} />}
-          {tab === "agora" && <Agora {...ctx} />}
           {tab === "futuro" && <Futuro {...ctx} />}
           {tab === "guardado" && <Guardado {...ctx} />}
           {tab === "relatorio" && <Relatorio {...ctx} />}
@@ -1766,7 +1911,7 @@ function Aplicacao() {
       </nav>
 
       {/* atalho para lançar de qualquer aba, sem rolar até o formulário */}
-      {tab !== "lancar" && !lancando && !detalhe && !lista && !conta && !cfg && (
+      {!lancando && !detalhe && !lista && !conta && !cfg && (
         <button onClick={() => setLancando(true)} aria-label="Novo lançamento"
           style={{ background: C.ink, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
           className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
@@ -2300,6 +2445,10 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
   const v = cents / 100;
   const credito = forma === "Crédito";
   const [mais, setMais] = useState(false);
+  /* entrada: para qual mês de vida é esse dinheiro. null = o app decide pela data */
+  const [refEscolhido, setRefEscolhido] = useState(null);
+  const refAuto = venc ? cicloDaEntrada(venc, diaVirada(d)) : mesAtual();
+  const refFinal = refEscolhido || refAuto;
 
   const pessoas = [...new Set([...d.cartoes.map((c) => c.dono), ...d.lancamentos.map((l) => l.deQuem)]
     .filter((n) => n && n !== "eu"))];
@@ -2328,6 +2477,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
       reembolso: deQuem.trim() || reemb ? "aguardando" : "nao",
       status: pago ? "pago" : "pendente", pagamento: pago ? venc : null,
       parcelas: nParc > 1 ? nParc : undefined,
+      ...(tipo === "entrada" && refFinal !== refAuto ? { ref: refFinal } : {}),
     };
     const comConta = tipo === "transferencia" ? { ...base, contaId: instr, destinoId: destino }
       : credito ? { ...base, cartaoId: instr, contaId: null }
@@ -2348,7 +2498,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
     } else {
       salvar(comConta);
     }
-    dispara({ tipo: "limpar" }); setMais(false);
+    dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null);
     aoSalvar?.();
   };
 
@@ -2372,6 +2522,20 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar }) 
               className="flex-1 rounded-xl border py-2 text-sm font-medium">{t}</button>
           ))}
         </div>
+
+        {tipo === "entrada" && venc && (
+          <div className="mb-4">
+            <Rotulo>Este dinheiro é para viver em</Rotulo>
+            <div className="flex gap-2">
+              {[ym(venc), mesSeguinte(ym(venc))].map((k) => (
+                <button key={k} onClick={() => setRefEscolhido(k)}
+                  style={{ background: refFinal === k ? C.in : C.bg, color: refFinal === k ? "#fff" : C.muted, borderColor: C.line }}
+                  className="flex-1 rounded-xl border py-2 text-sm font-medium capitalize">{nomeMes(k)}</button>
+              ))}
+            </div>
+            {refFinal !== ym(venc) && <p style={{ color: C.muted }} className="text-xs mt-1">Entra no saldo hoje, mas conta como dinheiro de {nomeMes(refFinal)}.</p>}
+          </div>
+        )}
 
         <CampoDinheiro centavos={cents} onChange={(c) => campo("cents", c)} cor={CORTIPO[tipo]} onEnter={enviar} />
 
@@ -2584,17 +2748,15 @@ function Lancar({ d, catOf, subOf, contaOf, cartaoOf, salvar, criarRecorrente, a
 
   return (
     <>
-      <FormLancamento d={d} catOf={catOf} salvar={salvar} criarRecorrente={criarRecorrente} flash={flash} />
-
-      <div className="flex items-center justify-between gap-2 mt-6 mb-3">
-        <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold">Lançamentos</h2>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold">Extrato</h2>
         <span style={{ color: C.muted, fontFamily: MONO }} className="text-xs">
           {lista.length} {lista.length === 1 ? "registro" : "registros"}
         </span>
       </div>
 
-      <div className="flex items-center gap-2 mb-3">
-        <div className="relative flex-1">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="relative flex-1 min-w-[14rem]">
           <input value={busca} onChange={(e) => setBusca(e.target.value)}
             placeholder="Buscar por nome, valor, categoria…" aria-label="Buscar lançamentos"
             style={{ background: C.surface, borderColor: busca ? C.tr : C.line, color: C.ink }}
@@ -2745,7 +2907,7 @@ function Evolucao({ dados, series, altura = 200 }) {
 }
 
 /* ================================================================= agora */
-function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subOf, contaOf, cartaoOf, pagar, pagarVarios, up, upVarios, flash, anulado, alheio, aCobrar, abrir, verLista, verConta, comDesfazer, abrirCompartilhar }) {
+function Agora({ soBlocos, d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subOf, contaOf, cartaoOf, pagar, pagarVarios, up, upVarios, flash, anulado, alheio, aCobrar, abrir, verLista, verConta, comDesfazer, abrirCompartilhar }) {
   /**
    * Manda a lista de cobrança para outra pessoa. Tenta na ordem:
    * 1. Menu nativo de compartilhar (leva direto ao WhatsApp) — o melhor caminho no celular.
@@ -2898,16 +3060,16 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
         </Bloco>
       )}
 
-      <Bloco id="apagar" titulo="A pagar neste mês" resumo={brl(somaC(doMes))} cor={doMes.length ? C.due : C.muted}
+      {!soBlocos && <Bloco id="apagar" titulo="A pagar neste mês" resumo={brl(somaC(doMes))} cor={doMes.length ? C.due : C.muted}
         aberto={aberto("apagar")} alternar={alternar} vazio="Nada em aberto. Tudo pago por aqui.">
         {doMes.length > 0 && (
           <div className="space-y-2 mb-2">
             {doMes.map((l) => <Linha key={l.id} l={l} {...{ catOf, subOf, contaOf, cartaoOf, anulado, up }} onOpen={() => abrir(l.id)} onPay={() => pagar(l)} plano />)}
           </div>
         )}
-      </Bloco>
+      </Bloco>}
 
-      {aReceber.length > 0 && (
+      {!soBlocos && aReceber.length > 0 && (
         <Bloco id="areceber" titulo="A receber" resumo={brl(somaC(aReceber))} cor={C.in}
           aberto={aberto("areceber")} alternar={alternar}>
           <div className="space-y-2 mb-2">
@@ -2919,6 +3081,260 @@ function Agora({ d, setD, bancos, fisicas, saldoConta, pendentes, M, catOf, subO
   );
 }
 
+/* ================================================================== mês
+   A tela principal. Responde, nesta ordem: quanto ainda posso gastar,
+   de onde vem essa conta, o que falta pagar, e se o app bate com o banco. */
+function Mes(props) {
+  const { d, catOf, subOf, contaOf, cartaoOf, anulado, up, abrir, verLista, pagar, pagarVarios, apagar, salvar,
+    liquidas, saldoConta, totalBancos, totalFisico, flash, abrirAjustes } = props;
+  const hoje = today();
+  const [mes, setMes] = useState(ym(hoje));
+  const [conferindo, setConferindo] = useState(false);
+  const r = useMemo(() => resumoCiclo(d, mes, hoje), [d, mes, hoje]);
+  const ehAtual = mes === ym(hoje);
+  const atrasados = useMemo(() => (ehAtual ? pendentesAtrasados(d, mes, hoje) : []), [d, mes, hoje, ehAtual]);
+  const rProx = useMemo(() => resumoCiclo(d, mesSeguinte(mes), hoje), [d, mes, hoje]);
+  const principal = r.entradas.itens.slice().sort((a, b) => b.valor - a.valor)[0];
+  const linhaProps = { catOf, subOf, contaOf, cartaoOf, anulado, up };
+
+  // quanto dá por dia até o fim do mês (só faz sentido no mês corrente)
+  const ultimoDia = new Date(+mes.slice(0, 4), +mes.slice(5, 7), 0).getDate();
+  const diasRestantes = ehAtual ? ultimoDia - +hoje.slice(8, 10) + 1 : null;
+  const porDia = diasRestantes && r.livre > 0 ? r.livre / diasRestantes : null;
+
+  const aPagar = [...r.fixas.itens, ...r.outros.itens, ...r.guardar.itens]
+    .filter((l) => !aconteceu(l, hoje)).sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+  const aReceber = r.entradas.itens.filter((l) => l.status === "pendente");
+
+  const ver = (titulo, itens, sub) => verLista({ titulo: `${titulo} · ${nomeMes(mes)}`, sub, itens });
+  const linhas = [
+    { k: "entradas", sinal: "+", nome: "Entrou para viver o mês", v: r.entradas.total, cor: C.in,
+      det: r.entradas.falta ? `${brl(r.entradas.falta)} ainda vai entrar` : principal ? `${principal.nome} · ${dm(principal.pagamento || principal.vencimento)}` : "nenhuma entrada ainda",
+      itens: r.entradas.itens },
+    { k: "fixas", sinal: "−", nome: "Contas fixas", v: r.fixas.total, cor: C.saved,
+      det: r.fixas.falta ? `${brl(r.fixas.feito)} pago · ${brl(r.fixas.falta)} a pagar` : r.fixas.total ? "tudo pago" : "",
+      itens: r.fixas.itens },
+    { k: "guardar", sinal: "−", nome: "Guardar nas caixinhas", v: r.guardar.total, cor: C.saved,
+      det: r.guardar.falta ? `${brl(r.guardar.falta)} ainda vai guardar` : r.guardar.total ? "já guardado" : "",
+      itens: r.guardar.itens },
+    { k: "cartao", sinal: "−", nome: "Compras no cartão", v: r.cartao.total, cor: C.due,
+      det: r.cartao.total ? "dinheiro reservado para pagar a fatura" : "",
+      itens: r.cartao.itens },
+    { k: "outros", sinal: "−", nome: "Gastos e comprometidos", v: r.outros.total, cor: C.out,
+      det: r.outros.falta ? `${brl(r.outros.feito)} gasto · ${brl(r.outros.falta)} a sair` : "pix, débito e dinheiro",
+      itens: r.outros.itens },
+  ];
+  const passou = mes < ym(hoje);
+  if (r.limites.length && !passou) linhas.push({ k: "limites", sinal: "−", nome: "Ainda cabe nos limites", v: r.reservadoLimites, cor: C.due,
+    det: "reserva do que falta gastar nos limites" });
+
+  return (
+    <>
+      {/* troca de mês */}
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={() => setMes(mesAnterior(mes))} aria-label="Mês anterior" style={{ background: C.surface, borderColor: C.line }}
+          className="w-10 h-10 rounded-full border flex items-center justify-center"><ChevronDown size={18} style={{ transform: "rotate(90deg)" }} /></button>
+        <div className="text-center">
+          <div style={{ fontFamily: DISPLAY }} className="text-xl font-bold capitalize">{nomeMes(mes)} {mes.slice(0, 4) !== hoje.slice(0, 4) ? mes.slice(0, 4) : ""}</div>
+          <div style={{ color: C.muted }} className="text-xs">{ehAtual ? "o mês que você está vivendo" : mes < ym(hoje) ? "mês que já passou" : "mês que vem"}</div>
+        </div>
+        <button onClick={() => setMes(mesSeguinte(mes))} aria-label="Próximo mês" style={{ background: C.surface, borderColor: C.line }}
+          className="w-10 h-10 rounded-full border flex items-center justify-center"><ChevronDown size={18} style={{ transform: "rotate(-90deg)" }} /></button>
+      </div>
+      {!ehAtual && (
+        <button onClick={() => setMes(ym(hoje))} style={{ color: C.tr }} className="block mx-auto -mt-1 mb-3 text-xs underline underline-offset-2">voltar para {nomeMes(ym(hoje))}</button>
+      )}
+      {ehAtual && rProx.entradas.feito > 0 && (
+        <button onClick={() => setMes(mesSeguinte(mes))} style={{ background: C.in + "14", color: C.in }}
+          className="w-full rounded-xl px-3 py-2 text-xs mb-3 text-left">
+          O dinheiro de <b>{nomeMes(mesSeguinte(mes))}</b> já entrou ({brl(rProx.entradas.feito)}). Toque para planejar {nomeMes(mesSeguinte(mes))} ›
+        </button>
+      )}
+
+      {/* o número que importa */}
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-3">
+        <div style={{ color: C.muted }} className="text-xs uppercase tracking-wider">
+          {passou ? (r.livre < 0 ? `Faltou em ${nomeMes(mes)}` : `Sobrou em ${nomeMes(mes)}`)
+            : r.livre < 0 ? `Falta para fechar ${nomeMes(mes)}` : `Livre para gastar em ${nomeMes(mes)}`}
+        </div>
+        <div style={{ fontFamily: MONO, color: r.livre < 0 ? C.out : C.in, letterSpacing: "-0.02em" }} className="text-4xl font-bold leading-tight mt-1">{brl(r.livre)}</div>
+        <div style={{ color: C.muted }} className="text-xs mt-1">
+          {porDia ? <>dá uns <b style={{ color: C.ink }}>{brl(porDia)} por dia</b> nos {diasRestantes} dias que faltam · </> : null}
+          {passou ? "o que entrou para o mês menos tudo que foi gasto e guardado" : "já descontado tudo que tem destino"}
+        </div>
+
+        {/* de onde vem esse número */}
+        <div style={{ borderColor: C.line }} className="mt-4 border-t">
+          {linhas.filter((x) => x.v || x.k === "entradas").map((x) => (
+            <button key={x.k} onClick={() => x.itens && ver(x.nome, x.itens)} disabled={!x.itens}
+              style={{ borderColor: C.line }} className="w-full flex items-center gap-3 py-2.5 border-b text-left">
+              <span style={{ color: x.cor, fontFamily: MONO }} className="w-4 text-center font-bold">{x.sinal}</span>
+              <span className="flex-1 min-w-0">
+                <span className="text-sm block">{x.nome}</span>
+                {x.det && <span style={{ color: C.muted }} className="text-xs block truncate">{x.det}</span>}
+              </span>
+              <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(x.v)}</span>
+            </button>
+          ))}
+          <div className="flex items-center gap-3 pt-2.5">
+            <span style={{ fontFamily: MONO }} className="w-4 text-center font-bold">=</span>
+            <span className="flex-1 text-sm font-semibold">{passou ? "Sobrou" : "Livre"}</span>
+            <span style={{ fontFamily: MONO, color: r.livre < 0 ? C.out : C.in }} className="text-sm font-bold">{brl(r.livre)}</span>
+          </div>
+        </div>
+        {r.deOutros.total > 0 && (
+          <button onClick={() => ver("De outras pessoas", r.deOutros.itens)} style={{ color: C.tr }} className="text-xs mt-3 text-left">
+            + {brl(r.deOutros.total)} de outras pessoas no seu cartão. Não entra na conta: vai para "A cobrar".
+          </button>
+        )}
+      </section>
+
+      {/* pendências de meses passados */}
+      {atrasados.length > 0 && (
+        <section style={{ background: C.due + "12", borderColor: C.due + "55" }} className="rounded-2xl border p-4 mb-3">
+          <div className="flex items-start gap-2 mb-1">
+            <AlertTriangle size={16} style={{ color: C.due }} className="shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-semibold">{atrasados.length} {atrasados.length === 1 ? "pendência" : "pendências"} de meses passados</div>
+              <div style={{ color: C.muted }} className="text-xs">Ou já aconteceu e faltou marcar, ou não vai mais acontecer. Resolva para o saldo bater.</div>
+            </div>
+          </div>
+          <div className="space-y-2 mt-3">
+            {atrasados.slice(0, 8).map((l) => (
+              <div key={l.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2">
+                <div className="flex items-center gap-2 cursor-pointer" onClick={() => abrir(l.id)}>
+                  <span className="flex-1 min-w-0 text-sm truncate">{l.nome}</span>
+                  <span style={{ fontFamily: MONO, color: CORTIPO[l.tipo] }} className="text-sm font-semibold">{brl(l.valor)}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <span style={{ color: C.muted }} className="text-xs flex-1">{l.cartaoId ? `fatura de ${cartaoOf(l.cartaoId)?.nome || "cartão"}` : `vencia ${dm(l.vencimento)}`}</span>
+                  <button onClick={() => apagar(l.id)} style={{ borderColor: C.line, color: C.muted }} className="rounded-lg border px-2.5 py-1 text-xs">Não aconteceu</button>
+                  <button onClick={() => pagar(l)} style={{ background: C.in, color: "#fff" }} className="rounded-lg px-2.5 py-1 text-xs">{l.tipo === "entrada" ? "Recebi" : "Já paguei"}</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {atrasados.length > 1 && (
+            <button onClick={() => pagarVarios(atrasados)} style={{ color: C.due }} className="text-xs underline underline-offset-2 mt-3">marcar todas como pagas</button>
+          )}
+        </section>
+      )}
+
+      {/* limites */}
+      <Rotulo>Limites por categoria</Rotulo>
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-3">
+        {r.limites.length === 0 ? (
+          <div className="text-sm" style={{ color: C.muted }}>
+            Você ainda não colocou limite em nenhuma categoria.{" "}
+            <button onClick={abrirAjustes} style={{ color: C.tr }} className="underline underline-offset-2">Definir limites</button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {r.limites.map((c) => {
+              const pct = Math.min(100, (c.gasto / c.limite) * 100), estourou = c.gasto > c.limite;
+              return (
+                <button key={c.id} className="w-full text-left" onClick={() => ver(c.nome, [...r.fixas.itens, ...r.cartao.itens, ...r.outros.itens].filter((l) => l.catId === c.id))}>
+                  <div className="flex items-baseline justify-between text-sm mb-1">
+                    <span>{c.nome}</span>
+                    <span style={{ fontFamily: MONO, color: estourou ? C.out : C.muted }} className="text-xs">
+                      {estourou ? `passou ${brl(c.gasto - c.limite)}` : `resta ${brl(c.resta)}`} · de {brl(c.limite)}
+                    </span>
+                  </div>
+                  <div style={{ background: C.bg }} className="h-2 rounded-full overflow-hidden">
+                    <div style={{ background: estourou ? C.out : pct > 80 ? C.due : c.cor, width: `${pct}%` }} className="h-full rounded-full" />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* o que falta pagar neste mês */}
+      {(aPagar.length > 0 || aReceber.length > 0) && (
+        <>
+          <div className="flex items-baseline justify-between">
+            <Rotulo>{passou ? `Ficou pendente em ${nomeMes(mes)}` : `Ainda vai sair em ${nomeMes(mes)}`}</Rotulo>
+            <span style={{ fontFamily: MONO, color: C.due }} className="text-xs font-semibold">{brl(somaC(aPagar))}</span>
+          </div>
+          <div className="space-y-2 mb-4">
+            {aPagar.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={() => pagar(l)} plano />)}
+            {aReceber.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={() => pagar(l)} plano />)}
+          </div>
+        </>
+      )}
+
+      {/* bate com o banco? */}
+      {ehAtual && (
+        <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div style={{ color: C.muted }} className="text-xs uppercase tracking-wider">Em conta hoje</div>
+              <div style={{ fontFamily: MONO }} className="text-lg font-bold">{brl(totalBancos + totalFisico)}</div>
+              <div style={{ color: C.muted }} className="text-xs">bancos e espécie, pelo que está lançado</div>
+            </div>
+            <button onClick={() => setConferindo(true)} style={{ background: C.ink, color: "#fff" }} className="rounded-xl px-3 py-2 text-sm shrink-0">Conferir com o banco</button>
+          </div>
+        </section>
+      )}
+
+      {ehAtual && <Agora {...props} soBlocos />}
+
+      {conferindo && <ConferirSaldo contas={liquidas} saldoConta={saldoConta} salvar={salvar} flash={flash} onClose={() => setConferindo(false)} />}
+    </>
+  );
+}
+
+/** Balanço: você diz quanto tem de verdade em cada conta e o app acerta a diferença. */
+function ConferirSaldo({ contas, saldoConta, salvar, flash, onClose }) {
+  const [real, setReal] = useState({});
+  const linhas = contas.map((c) => {
+    const app = saldoConta(c.id);
+    const digitado = real[c.id];
+    const tem = digitado != null && digitado !== "";
+    const dif = tem ? +(num(digitado) - app).toFixed(2) : 0;
+    return { c, app, tem, dif };
+  });
+  const acertar = () => {
+    const comDif = linhas.filter((x) => x.tem && Math.abs(x.dif) >= 0.01);
+    if (!comDif.length) { flash("Tudo batendo. Nada para acertar."); onClose(); return; }
+    comDif.forEach(({ c, dif }) => salvar({
+      tipo: dif < 0 ? "saida" : "entrada", nome: dif < 0 ? "Gastos não detalhados" : "Ajuste de saldo",
+      valor: Math.abs(dif), catId: dif < 0 ? "outros" : "renda", subId: null, forma: "Pix",
+      contaId: c.id, cartaoId: null, vencimento: today(), pagamento: today(), status: "pago",
+      obs: "acerto da conferência com o banco", reembolso: "nao" }));
+    flash(`${comDif.length} ${comDif.length === 1 ? "conta acertada" : "contas acertadas"}`);
+    onClose();
+  };
+  return (
+    <Painel titulo="Conferir com o banco" onClose={onClose}
+      rodape={<button onClick={acertar} style={{ background: C.ink, color: "#fff" }} className="w-full rounded-xl py-3 text-sm font-medium">Acertar diferenças</button>}>
+      <p style={{ color: C.muted }} className="text-sm mb-3">Abra o app do banco e digite o saldo de agora. Deixe em branco a conta que não quiser conferir.</p>
+      <div className="space-y-2">
+        {linhas.map(({ c, app, tem, dif }) => (
+          <div key={c.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="flex-1 text-sm font-medium">{c.nome}</span>
+              <span style={{ color: C.muted, fontFamily: MONO }} className="text-xs">no app {brl(app)}</span>
+            </div>
+            <div className="flex items-center gap-2 mt-2">
+              <input value={real[c.id] ?? ""} onChange={(e) => setReal({ ...real, [c.id]: e.target.value })} inputMode="decimal"
+                placeholder="saldo real" aria-label={`Saldo real de ${c.nome}`}
+                style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-32 rounded-lg border px-2 py-1.5 text-sm outline-none" />
+              <span style={{ color: !tem ? C.muted : Math.abs(dif) < 0.01 ? C.in : C.out }} className="text-xs flex-1 text-right">
+                {!tem ? "" : Math.abs(dif) < 0.01 ? "bate ✓" : dif < 0 ? `banco tem ${brl(-dif)} a menos` : `banco tem ${brl(dif)} a mais`}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p style={{ color: C.muted }} className="text-xs mt-3">
+        Faltou dinheiro? Vira "Gastos não detalhados". Se lembrar o que foi, abra o lançamento e troque o nome e a categoria.
+      </p>
+    </Painel>
+  );
+}
+
 /* ================================================================ futuro */
 function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir, verLista }) {
   const [janela, setJanela] = useState(12);
@@ -2926,6 +3342,10 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
   const [ate, setAte] = useState("");
   const [nome, setNome] = useState("");
   const [valor, setValor] = useState("");
+  const [quando, setQuando] = useState("");
+  const [comoCalcula, setComoCalcula] = useState(false);
+  const prev = useMemo(() => previsaoLivre(d, 6), [d]);
+  const base = prev[0]?.base;
 
   const intervaloValido = de && ate && de <= ate;
   const limite = intervaloValido ? null : addMonths(today(), janela).slice(0, 7);
@@ -2956,8 +3376,8 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
     const v = num(valor);
     if (!nome.trim()) { flash("Dê um nome para a intenção"); return; }
     if (v <= 0) { flash("Digite um valor maior que zero"); return; }
-    setD((atual) => ({ ...atual, intencoes: [...(atual.intencoes || []), { id: uid(), nome, valor: v, obs: "" }] }));
-    setNome(""); setValor("");
+    setD((atual) => ({ ...atual, intencoes: [...(atual.intencoes || []), { id: uid(), nome, valor: v, obs: "", quando: quando || undefined }] }));
+    setNome(""); setValor(""); setQuando("");
     flash("Intenção anotada");
   };
   const virarConta = (i) => {
@@ -2981,7 +3401,44 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
 
   return (
     <>
-      <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold mb-1">O que já está comprometido</h2>
+      <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold mb-1">Quanto vai sobrar</h2>
+      <p style={{ color: C.muted }} className="text-sm mb-3">Estimativa de dinheiro livre nos próximos meses, com o que já está lançado e a sua média.</p>
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-2">
+        {prev.map((p) => {
+          const maxAbs = Math.max(1, ...prev.map((x) => Math.abs(x.livre)));
+          return (
+            <button key={p.mes} onClick={() => verLista({ titulo: `${mesLabel(p.mes)} · como fica`, sub: "Compromissos já lançados para este mês",
+                itens: d.lancamentos.filter((l) => cicloDe(l, diaVirada(d)) === p.mes) })}
+              style={{ borderColor: C.line }} className="w-full text-left py-2.5 border-b last:border-b-0">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-sm font-medium capitalize">{nomeMes(p.mes)}{p.real && <span style={{ color: C.muted }} className="font-normal normal-case"> · agora</span>}</span>
+                <span style={{ fontFamily: MONO, color: p.livre < 0 ? C.out : C.in }} className="text-sm font-bold">{brl(p.livre)}</span>
+              </div>
+              <div style={{ background: C.bg }} className="h-1.5 rounded-full overflow-hidden my-1.5">
+                <div style={{ background: p.livre < 0 ? C.out : C.in, width: `${(Math.abs(p.livre) / maxAbs) * 100}%`, opacity: p.real ? 1 : 0.6 }} className="h-full rounded-full" />
+              </div>
+              <div style={{ color: C.muted }} className="grid grid-cols-2 gap-x-4 text-xs">
+                {[["entra", p.entrada, p.estimouEntrada ? "*" : ""], ["fixas", -p.fixas], ["caixinhas", -p.guardar], ["dia a dia", -p.diaADia],
+                  ...(p.planejado ? [["planejado", -p.planejado]] : [])].map(([n, v, x]) => (
+                  <span key={n} className="flex justify-between"><span>{n}</span><span style={{ fontFamily: MONO }}>{v > 0 ? "+" : v < 0 ? "−" : ""}{brl(Math.abs(v)).replace("R$ ", "")}{x}</span></span>
+                ))}
+              </div>
+            </button>
+          );
+        })}
+      </section>
+      <button onClick={() => setComoCalcula(!comoCalcula)} style={{ color: C.tr }} className="text-xs underline underline-offset-2 mb-2">{comoCalcula ? "esconder" : "como é calculado?"}</button>
+      {comoCalcula && base && (
+        <div style={{ color: C.muted }} className="text-xs mb-3 space-y-1">
+          <p>* Entrada: quando o mês ainda não tem nada lançado, uso a média dos últimos {base.meses || 0} meses ({brl(base.mediaEntrada)}).</p>
+          <p>Fixas: as contas fixas que o app já gerou para aquele mês.</p>
+          <p>Caixinhas: o que está programado ou, sem nada programado, a média ({brl(base.mediaGuardar)}).</p>
+          <p>Dia a dia: parcelas já lançadas + o maior entre o que já está previsto e {base.somaLimites > 0 ? `a soma dos seus limites (${brl(base.somaLimites)})` : `a média de gastos sem contas fixas (${brl(base.mediaDiaADia)}). Com limites nas categorias a previsão fica mais certa`}.</p>
+          <p>Planejado: intenções com mês marcado (lá embaixo).</p>
+        </div>
+      )}
+
+      <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold mb-1 mt-6">O que já está comprometido</h2>
       <p style={{ color: C.muted }} className="text-sm mb-3">Contas fixas, previstas e parcelas. Parcela adiantada continua no mês dela, marcada como paga.</p>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -3062,27 +3519,29 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       </div>
 
       <div className="flex items-baseline justify-between mt-8 mb-2">
-        <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold flex items-center gap-2"><Lightbulb size={18} /> Intenções</h2>
+        <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold flex items-center gap-2"><Lightbulb size={18} /> Planejados</h2>
         <span style={{ fontFamily: MONO, color: C.muted }} className="text-sm">{brl(totIntencoes)}</span>
       </div>
-      <p style={{ color: C.muted }} className="text-sm mb-3">Coisas que você quer reservar dinheiro para fazer. Não têm data e não entram no comprometido.</p>
+      <p style={{ color: C.muted }} className="text-sm mb-3">Gastos que você planeja. Com mês marcado, entram na previsão de quanto vai sobrar; sem mês, ficam só anotados.</p>
       <div className="space-y-2 mb-3">
         {(d.intencoes || []).map((i) => (
           <div key={i.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2.5 flex items-center gap-3">
-            <span className="flex-1 text-sm">{i.nome}</span>
+            <span className="flex-1 text-sm">{i.nome}{i.quando && <span style={{ color: C.muted }} className="text-xs"> · {mesLabel(i.quando)}</span>}</span>
             <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
             <button onClick={() => virarConta(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virar conta</button>
             <button onClick={() => setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id) }))} style={{ color: C.muted }}><Trash2 size={14} /></button>
           </div>
         ))}
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="O que você quer fazer"
           style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none" />
         <input value={valor} onChange={(e) => setValor(e.target.value)} placeholder="Valor" inputMode="decimal"
           onKeyDown={(e) => e.key === "Enter" && addIntencao()}
           style={{ background: C.surface, borderColor: C.line }} className="w-24 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <button onClick={addIntencao} style={{ background: C.ink, color: "#fff" }} className="px-4 rounded-xl text-sm">Anotar</button>
+        <input type="month" value={quando} onChange={(e) => setQuando(e.target.value)} aria-label="Mês planejado"
+          style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2 text-sm outline-none" />
+        <button onClick={addIntencao} style={{ background: C.ink, color: "#fff" }} className="px-4 py-2 rounded-xl text-sm">Anotar</button>
       </div>
     </>
   );
@@ -3551,7 +4010,7 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
 
 /* ================================================================ ajustes */
 function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
-  const [aba, setAba] = useState("categorias");
+  const [aba, setAba] = useState("mes");
   const [salvoEm, setSalvoEm] = useState(null);
   const set = (patch) => {
     setD((atual) => ({ ...atual, ...patch }));
@@ -3573,7 +4032,7 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atua
         const { dados, aplicadas, de } = prepararDados(bruto);
         if (!dados || !Array.isArray(bruto.lancamentos)) { flash("Isto não parece um backup da caderneta"); return; }
         // mantém a configuração deste aparelho: ela não vem no arquivo
-        setD({ ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, ateOnde: 0 });
+        setD({ ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, ateOnde: 0 });
         flash(aplicadas.length
           ? `Importado e convertido da versão ${de}`
           : `Importado: ${dados.lancamentos.length} lançamentos`);
@@ -3593,10 +4052,30 @@ function Ajustes({ d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atua
           <button onClick={onClose}><X size={20} /></button>
         </div>
         <div className="flex flex-wrap gap-2 mb-4">
-          {[["categorias", "Categorias"], ["contas", "Contas"], ["cartoes", "Cartões"], ["recorrentes", "Recorrentes"], ["dados", "Dados"]].map(([k, t]) => (
+          {[["mes", "Meu mês"], ["categorias", "Categorias e limites"], ["contas", "Contas"], ["cartoes", "Cartões"], ["recorrentes", "Recorrentes"], ["dados", "Dados"]].map(([k, t]) => (
             <Chip key={k} ativo={aba === k} cor={C.ink} onClick={() => setAba(k)}>{t}</Chip>
           ))}
         </div>
+        {aba === "mes" && (
+          <>
+            <Rotulo>Quando começa o seu mês</Rotulo>
+            <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-3 mb-2">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="flex-1">Entradas a partir do dia</span>
+                <CampoInteiro valor={diaVirada(d)} onValor={(v) => set({ diaVirada: v })} min={1} max={31}
+                  style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-16 rounded-lg border px-2 py-1 text-sm text-center outline-none" />
+              </div>
+              <p style={{ color: C.muted }} className="text-xs mt-2">
+                contam para o mês seguinte. Ex.: com dia {diaVirada(d)}, o salário que cai em {String(Math.max(diaVirada(d), 30)).padStart(2, "0")}/10 é o dinheiro de novembro.
+                Compras no crédito contam no mês em que você comprou, não no da fatura.
+              </p>
+            </div>
+            <p style={{ color: C.muted }} className="text-xs mb-3">
+              Numa entrada específica você pode trocar o mês na hora de lançar (ou depois, tocando no lançamento).
+              Caixinhas com "salário" no nome são tratadas como dinheiro de viver, não como economia — dá para mudar em Contas.
+            </p>
+          </>
+        )}
         {aba === "categorias" && <AbaCategorias d={d} set={set} flash={flash} />}
         {aba === "contas" && <AbaContas d={d} set={set} flash={flash} />}
         {aba === "cartoes" && <AbaCartoes d={d} set={set} flash={flash} />}
@@ -3775,6 +4254,12 @@ function AbaContas({ d, set, flash }) {
                 style={{ background: C.bg, borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs outline-none" />
               <input value={c.objetivo || ""} onChange={(e) => upC(c.id, { objetivo: e.target.value })} placeholder="para quê?"
                 style={{ background: C.bg, borderColor: C.line }} className="flex-1 min-w-[7rem] rounded-lg border px-2 py-1 text-xs outline-none" />
+              {c.tipo === "caixinha" && (
+                <label style={{ color: C.muted }} className="w-full flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={ehCaixinhaDeViver(c)} onChange={(e) => upC(c.id, { deViver: e.target.checked })} />
+                  guarda dinheiro de viver o mês (não conta como economia)
+                </label>
+              )}
             </div>
           )}
           </div>
@@ -4385,6 +4870,18 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
                 : (l.tipo === "entrada" ? "a receber" : "pendente")}
           </Campo>
           <Campo rot={l.status === "pago" ? "Previsto para" : "Vence em"}>{dm(venceMostrar)}</Campo>
+          {(() => {   // em que mês de vida este lançamento conta; numa entrada dá para trocar
+            const k = cicloDe(l, diaVirada(d)), data = ym(dataDoCiclo(l) || l.vencimento);
+            return (
+              <Campo rot="Conta no mês de">
+                <span className="capitalize">{nomeMes(k)}</span>
+                {l.tipo === "entrada" && (
+                  <button onClick={() => up(l.id, { ref: k === data ? mesSeguinte(data) : data })} style={{ color: C.tr }}
+                    className="ml-2 text-xs underline underline-offset-2">trocar para {nomeMes(k === data ? mesSeguinte(data) : data)}</button>
+                )}
+              </Campo>
+            );
+          })()}
           {cat && <Campo rot="Categoria">{cat.nome}{l.subId && subOf(l.catId, l.subId) ? ` · ${subOf(l.catId, l.subId).nome}` : ""}</Campo>}
           {l.forma && <Campo rot="Forma">{l.forma}</Campo>}
           {cartao && <Campo rot="Cartão">{cartao.nome}{cartao.dono !== "eu" ? ` (de ${cartao.dono})` : ""} · fecha {cartao.fecha}, vence {cartao.vence}</Campo>}
