@@ -2465,6 +2465,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
   const [mais, setMais] = useState(false);
   const [deOutro, setDeOutro] = useState(false);   // "de quem é" aberto
   const [nomeNovo, setNomeNovo] = useState("");
+  const [outraTodo, setOutraTodo] = useState(false);   // "todo de" alguém que ainda não está na lista
   const ontem = iso(new Date(Date.now() - 864e5));
   const modo = repetir ? "fixa" : nParc > 1 || parcelas === "" ? "parcelado" : "uma";
   const partes = dividir.length + 1;
@@ -2530,7 +2531,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     } else {
       salvar(pedacos);
     }
-    dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null); setDeOutro(false);
+    dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null); setDeOutro(false); setOutraTodo(false);
     aoSalvar?.(continuar.current);
     continuar.current = false;
   };
@@ -2707,12 +2708,19 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
 
             <Rotulo>De quem é</Rotulo>
             <div className="flex flex-wrap gap-2 mb-2">
-              <Chip ativo={!deQuem && !dividir.length} cor={C.ink} onClick={() => { escolher("deQuem", ""); campo("dividir", []); }}>Só meu</Chip>
+              <Chip ativo={!deQuem && !dividir.length && !outraTodo && !deOutro} cor={C.ink} onClick={() => { escolher("deQuem", ""); campo("dividir", []); setOutraTodo(false); setDeOutro(false); }}>Só meu</Chip>
               {pessoas.map((n) => (
-                <Chip key={"d" + n} ativo={deQuem === n} cor={C.tr} onClick={() => { escolher("deQuem", deQuem === n ? "" : n); campo("dividir", []); }}>Todo de {n}</Chip>
+                <Chip key={"d" + n} ativo={deQuem === n} cor={C.tr} onClick={() => { escolher("deQuem", deQuem === n ? "" : n); campo("dividir", []); setOutraTodo(false); }}>Todo de {n}</Chip>
               ))}
-              <Chip ativo={dividir.length > 0 || deOutro} cor={C.tr} onClick={() => { setDeOutro(!deOutro); escolher("deQuem", ""); }}>Dividido</Chip>
+              <Chip ativo={outraTodo || (!!deQuem && !pessoas.includes(deQuem))} cor={C.tr}
+                onClick={() => { setOutraTodo(true); setDeOutro(false); campo("dividir", []); if (pessoas.includes(deQuem)) escolher("deQuem", ""); }}>Todo de outra pessoa</Chip>
+              <Chip ativo={dividir.length > 0 || deOutro} cor={C.tr} onClick={() => { setDeOutro(!deOutro); setOutraTodo(false); escolher("deQuem", ""); }}>Dividido</Chip>
             </div>
+            {(outraTodo || (!!deQuem && !pessoas.includes(deQuem))) && (
+              <input value={deQuem} onChange={(e) => escolher("deQuem", e.target.value)} placeholder="Nome de quem comprou" autoFocus
+                aria-label="Nome de quem comprou"
+                style={{ background: C.bg, borderColor: C.line }} className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-2" />
+            )}
             {(deOutro || dividir.length > 0) && (
               <div style={{ background: C.tr + "0F", borderColor: C.tr + "40" }} className="rounded-xl border p-3 mb-2">
                 <div style={{ color: C.tr }} className="text-xs mb-2">Dividir em partes iguais entre você e:</div>
@@ -2736,7 +2744,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
                 )}
               </div>
             )}
-            {deQuem && <p style={{ color: C.tr }} className="text-xs mb-2">Entra na fatura, mas não conta como gasto seu. Vai para a cobrança de {deQuem}.</p>}
+            {deQuem.trim() && <p style={{ color: C.tr }} className="text-xs mb-2">Entra na fatura, mas não conta como gasto seu. Vai para a cobrança de {deQuem}.</p>}
             <div className="mb-2" />
           </>
         )}
