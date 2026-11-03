@@ -4077,8 +4077,87 @@ function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
 }
 
 /* ================================================================ ajustes */
+/** Começar do zero: guarda uma cópia, apaga o histórico e parte dos saldos que você informa.
+    Mantém contas, cartões e categorias (com limites), que dão trabalho para recriar. */
+function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
+  const M = mesAtual(), anterior = mesAnterior(M);
+  const ultimoDoAnterior = `${anterior}-${String(new Date(+anterior.slice(0, 4), +anterior.slice(5, 7), 0).getDate()).padStart(2, "0")}`;
+  const [saldos, setSaldos] = useState({});
+  const [entrada, setEntrada] = useState("");
+  const [manterFixas, setManterFixas] = useState(false);
+  const [confirmar, setConfirmar] = useState("");
+  const bancos = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
+  const destinoEntrada = bancos[0];
+
+  const fazer = () => {
+    if (confirmar.trim().toLowerCase() !== "zerar") { flash('Digite "zerar" para confirmar'); return; }
+    exportar();   // cópia de segurança antes de tudo
+    const vEntrada = Math.max(0, num(entrada));
+    const contas = d.contas.map((c) => {
+      const informado = saldos[c.id] != null && saldos[c.id] !== "" ? num(saldos[c.id]) : 0;
+      // a entrada é lançada (para o mês ter de onde partir), então sai do saldo de partida
+      const ajuste = destinoEntrada && c.id === destinoEntrada.id ? vEntrada : 0;
+      return { ...c, saldoInicial: +(informado - ajuste).toFixed(2) };
+    });
+    const lancamentos = vEntrada > 0 && destinoEntrada ? [{
+      id: uid(), tipo: "entrada", nome: "Dinheiro para viver o mês", valor: vEntrada, catId: "renda", subId: null,
+      forma: "Pix", contaId: destinoEntrada.id, cartaoId: null, vencimento: ultimoDoAnterior, pagamento: ultimoDoAnterior,
+      status: "pago", obs: "ponto de partida", reembolso: "nao", ref: M, criadoEm: new Date().toISOString() }] : [];
+    setD((atual) => gerar({ ...atual, contas, lancamentos,
+      recorrentes: manterFixas ? atual.recorrentes : [], intencoes: [], cancelados: [] }));
+    flash("Pronto: começando do zero. Uma cópia do antigo foi baixada.");
+    onClose();
+  };
+
+  return (
+    <Painel titulo="Começar do zero" onClose={onClose}
+      rodape={<button onClick={fazer} style={{ background: C.out, color: "#fff" }} className="w-full rounded-xl py-3 text-sm font-medium">Apagar o histórico e começar</button>}>
+      <p style={{ color: C.muted }} className="text-sm mb-3">
+        Apaga todos os lançamentos{manterFixas ? "" : ", contas fixas"} e planejados. Mantém suas contas, cartões e categorias com limites.
+        Antes de apagar, o app baixa uma cópia de tudo (arquivo .json).
+      </p>
+
+      <Rotulo>Quanto tinha em {dm(ultimoDoAnterior)}, já com o salário</Rotulo>
+      <p style={{ color: C.muted }} className="text-xs mb-2">O saldo antes de pagar as contas de {nomeMes(M)}. Depois você lança o que já pagou em {nomeMes(M)} e o app chega no saldo de hoje.</p>
+      <div className="space-y-2 mb-4">
+        {d.contas.map((c) => (
+          <div key={c.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2 flex items-center gap-2">
+            <span className="flex-1 text-sm">{c.nome}</span>
+            <span style={{ color: C.muted }} className="text-xs">{c.tipo === "fisico" ? "espécie" : c.tipo}</span>
+            <input value={saldos[c.id] ?? ""} onChange={(e) => setSaldos({ ...saldos, [c.id]: e.target.value })} inputMode="decimal"
+              placeholder="0,00" aria-label={`Saldo de ${c.nome}`}
+              style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-28 rounded-lg border px-2 py-1.5 text-sm text-right outline-none" />
+          </div>
+        ))}
+      </div>
+
+      {destinoEntrada && (
+        <>
+          <Rotulo>Quanto entrou para viver {nomeMes(M)}</Rotulo>
+          <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2 flex items-center gap-2 mb-1">
+            <span className="flex-1 text-sm">Salário e outras entradas</span>
+            <input value={entrada} onChange={(e) => setEntrada(e.target.value)} inputMode="decimal" placeholder="0,00" aria-label="Entrada do mês"
+              style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-28 rounded-lg border px-2 py-1.5 text-sm text-right outline-none" />
+          </div>
+          <p style={{ color: C.muted }} className="text-xs mb-4">Já está dentro do saldo do {destinoEntrada.nome} acima; aqui é só para o app saber com quanto você vive o mês.</p>
+        </>
+      )}
+
+      <label className="flex items-center gap-2 text-sm mb-4">
+        <input type="checkbox" checked={manterFixas} onChange={(e) => setManterFixas(e.target.checked)} />
+        Manter as contas fixas e assinaturas que já estão cadastradas ({d.recorrentes.length})
+      </label>
+
+      <Rotulo>Para confirmar, digite "zerar"</Rotulo>
+      <input value={confirmar} onChange={(e) => setConfirmar(e.target.value)} placeholder="zerar" aria-label="Confirmar"
+        style={{ background: C.bg, borderColor: C.line }} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" />
+    </Painel>
+  );
+}
+
 function Ajustes({ abaInicial, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aba, setAba] = useState(abaInicial || "mes");
+  const [zerando, setZerando] = useState(false);
   const [salvoEm, setSalvoEm] = useState(null);
   const set = (patch) => {
     setD((atual) => ({ ...atual, ...patch }));
@@ -4185,7 +4264,15 @@ function Ajustes({ abaInicial, d, setD, onClose, flash, comDesfazer, apagarRecor
               O app sempre grava primeiro neste aparelho, por isso nunca trava esperando a internet.
             </p>
 
-            <Rotulo>Apagar tudo</Rotulo>
+            <Rotulo>Começar do zero</Rotulo>
+            <button onClick={() => setZerando(true)} style={{ background: C.surface, borderColor: C.out, color: C.out }}
+              className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
+              <RotateCcw size={15} /> Começar do zero
+            </button>
+            <p style={{ color: C.muted }} className="text-xs mb-4">Apaga o histórico e as contas fixas, mantém contas, cartões e categorias, e pergunta os saldos de partida.</p>
+            {zerando && <ComecarDoZero d={d} setD={setD} exportar={exportar} flash={flash} onClose={() => setZerando(false)} />}
+
+            <Rotulo>Apagar só os lançamentos</Rotulo>
             <BotaoConfirma
               onConfirm={() => comDesfazer(`${d.lancamentos.length} lançamentos apagados`, () =>
                 setD((atual) => ({ ...atual, lancamentos: [], cancelados: [] })))}
