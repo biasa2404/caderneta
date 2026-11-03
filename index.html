@@ -1689,6 +1689,57 @@ function Aplicacao() {
     }
   };
 
+  /**
+   * Faz ESTE aparelho valer para todos: o que está na planilha e não está
+   * aqui é apagado lá, e tudo daqui é regravado com carimbo novo. Os outros
+   * aparelhos recebem isso na próxima sincronia. É o conserto para quando
+   * os dados de dois aparelhos se misturaram.
+   */
+  const substituirPlanilha = async (dadosCertos) => {
+    const dados = dadosCertos || dRef.current;
+    const url = dados?.sheetsUrl;
+    if (!url) { flash("A sincronia com a planilha não está ligada neste aparelho"); return false; }
+    if (!navigator.onLine) { flash("Sem internet. Tente de novo quando conectar."); return false; }
+    while (emCurso.current) await new Promise((ok) => setTimeout(ok, 300));
+    emCurso.current = true;
+    setSync((x) => ({ ...x, estado: "enviando" }));
+    const pedir = async (corpo) => {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ v: 4, segredo: dados.sheetsSegredo || "", ...corpo }) });
+      if (!r.ok) throw new Error("resposta " + r.status);
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.erro || "recusado");
+      return j;
+    };
+    try {
+      // 1. o que existe hoje na planilha
+      const j1 = await pedir({ desde: 0, mudancas: [] });
+      const { estado: remoto } = aplicarMudancas({}, j1.mudancas || []);
+      // 2. apaga lá o que não existe aqui e regrava tudo daqui
+      const agora = Date.now();
+      const mudancas = [];
+      const carimbado = { ...dados };
+      for (const col of COLECOES) {
+        const aqui = new Set((dados[col] || []).map((r) => r.id));
+        for (const r of remoto[col] || []) if (!aqui.has(r.id)) mudancas.push({ col, id: r.id, mEm: agora, del: true });
+        carimbado[col] = (dados[col] || []).map((r) => ({ ...r, mEm: agora }));
+        for (const r of carimbado[col]) mudancas.push({ col, id: r.id, mEm: agora, rec: r });
+      }
+      const j2 = await pedir({ desde: j1.agora || 0, mudancas });
+      const final = { ...carimbado, ateOnde: j2.agora };
+      baseSync.current = baseDe(final);
+      setD(final);
+      setSync({ estado: "ok", quando: Date.now(), trouxe: 0 });
+      return true;
+    } catch (e) {
+      setSync({ estado: "erro", quando: null, msg: e.message });
+      flash("Não deu para falar com a planilha: " + e.message);
+      return false;
+    } finally {
+      emCurso.current = false;
+    }
+  };
+
   /* busca novidades: ao voltar para o app, ao reconectar, e a cada minuto */
   useEffect(() => {
     if (!d?.sheetsUrl) return;
@@ -1889,7 +1940,7 @@ function Aplicacao() {
 
   const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
-    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true) };
+    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha };
   const livreDoMes = resumoCiclo(d, M).livre;
   /* lembretes: ficam no topo até você fazer a operação ou fechar o aviso */
   const hojeL = today();
@@ -4248,7 +4299,7 @@ function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
   );
 }
 
-function Ajustes({ abaInicial, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
+function Ajustes({ abaInicial, substituirPlanilha, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aba, setAba] = useState(abaInicial || "mes");
   const [zerando, setZerando] = useState(false);
   const [salvoEm, setSalvoEm] = useState(null);
@@ -4272,7 +4323,15 @@ function Ajustes({ abaInicial, d, setD, onClose, flash, comDesfazer, apagarRecor
         const { dados, aplicadas, de } = prepararDados(bruto);
         if (!dados || !Array.isArray(bruto.lancamentos)) { flash("Isto não parece um backup da caderneta"); return; }
         // mantém a configuração deste aparelho: ela não vem no arquivo
-        setD({ ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, ateOnde: 0 });
+        const novo = { ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, ateOnde: 0 };
+        if (d.sheetsUrl) {
+          // com a planilha ligada, importar SUBSTITUI tudo lá também — antes
+          // ele mesclava com o que havia na planilha e os dados se misturavam
+          flash("Importando e substituindo na planilha…");
+          substituirPlanilha(novo).then((ok) => ok && flash(`Importado: ${dados.lancamentos.length} lançamentos, planilha substituída`));
+          return;
+        }
+        setD(novo);
         flash(aplicadas.length
           ? `Importado e convertido da versão ${de}`
           : `Importado: ${dados.lancamentos.length} lançamentos`);
@@ -4343,6 +4402,15 @@ function Ajustes({ abaInicial, d, setD, onClose, flash, comDesfazer, apagarRecor
                 </button>
                 <p style={{ color: C.muted }} className="text-xs mb-4">
                   O app já traz as novidades sozinho ao abrir e a cada minuto. Use isto só se desconfiar que faltou alguma coisa.
+                </p>
+                <BotaoConfirma onConfirm={async () => { if (await substituirPlanilha()) flash("Pronto: este aparelho agora vale para todos"); }}
+                  pergunta="Apagar na planilha o que não está aqui?" cor={C.out} estilo={{ borderColor: C.line }}
+                  className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
+                  <Upload size={15} /> Este aparelho é o certo: substituir a planilha
+                </BotaoConfirma>
+                <p style={{ color: C.muted }} className="text-xs mb-4">
+                  Para quando os dados de dois aparelhos se misturaram. O que não estiver neste aparelho é apagado na planilha,
+                  e os outros aparelhos ficam iguais a este na próxima vez que abrirem.
                 </p>
               </>
             )}
