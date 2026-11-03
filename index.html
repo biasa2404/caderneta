@@ -449,6 +449,12 @@ const mesLabel = (k) => { const [y, m] = k.split("-").map(Number);
 const mesCurto = (k) => { const [y, m] = k.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "short" }).replace(".", ""); };
 const dm = (s) => (s ? `${s.slice(8, 10)}/${s.slice(5, 7)}` : "");
+/** Quantos meses de "a" até "b" (ambos "AAAA-MM"). */
+const mesesEntre = (a, b) => (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7));
+/** A conta fixa cai neste mês? Com "a cada N meses", só nos meses do ritmo, contados do início. */
+const caiNoMes = (r, mes) => { const n = Math.max(1, +r.cada || 1);
+  return n === 1 || !r.inicio || ((mesesEntre(r.inicio, mes) % n) + n) % n === 0; };
+const somarDias = (dataIso, n) => { const [y, m, dd] = dataIso.split("-").map(Number); return iso(new Date(y, m - 1, dd + n)); };
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /**
@@ -562,6 +568,8 @@ function gerar(d, meses = 24) {
       out = out.filter((l) => !(l.recId === r.id && l.status === "pendente" && !manter.has(l.id)));
     }
 
+    // mudou o ritmo (ex.: passou a ser a cada 2 meses): tira as pendentes fora do ritmo
+    if ((+r.cada || 1) > 1) out = out.filter((l) => !(l.recId === r.id && l.src && l.status === "pendente" && !caiNoMes(r, ym(l.vencimento))));
     let feitas = out.filter((l) => l.recId === r.id).length;
     for (let i = 0; i < meses; i++) {
       const venc = addMonths(`${base.slice(0, 7)}-${String(r.dia).padStart(2, "0")}`, i);
@@ -570,6 +578,7 @@ function gerar(d, meses = 24) {
       if (ym(venc) < ym(base)) continue;
       if (r.fim?.tipo === "data" && r.fim.data && venc > r.fim.data) break;
       if (r.fim?.tipo === "vezes" && feitas >= r.fim.vezes) break;
+      if (!caiNoMes(r, ym(venc))) continue;
       const src = `${r.id}#${ym(venc)}`;
       if (out.some((l) => l.src === src)) { continue; }
       if ((d.cancelados || []).some((c) => c.id === src)) { continue; }   // você apagou esta de propósito
@@ -583,6 +592,7 @@ function gerar(d, meses = 24) {
         // parte de outra pessoa numa assinatura dividida: todo mês vira cobrança
         ...(r.deQuem ? { deQuem: r.deQuem, reembolso: "aguardando" } : { reembolso: "nao" }),
         conferir: !!r.variavel,
+        ...(r.lembrarDias != null ? { lembrarDias: r.lembrarDias } : {}),
       });
       feitas++;
     }
@@ -1867,6 +1877,12 @@ function Aplicacao() {
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true) };
   const livreDoMes = resumoCiclo(d, M).livre;
+  /* lembretes: ficam no topo até você fazer a operação ou fechar o aviso */
+  const hojeL = today();
+  const lembretes = d.lancamentos.filter((l) => l.status === "pendente" && l.lembrarDias != null && !l.lembreteFechado
+    && l.vencimento <= somarDias(hojeL, +l.lembrarDias || 0)).sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+  const quandoVence = (v) => { const n = Math.round((new Date(v + "T12:00") - new Date(hojeL + "T12:00")) / 864e5);
+    return n < 0 ? `venceu ${dm(v)}` : n === 0 ? "hoje" : n === 1 ? "amanhã" : `em ${n} dias`; };
 
   const tabs = [
     { id: "mes", nome: "Mês", icon: Wallet }, { id: "lancar", nome: "Extrato", icon: Repeat },
@@ -1905,6 +1921,22 @@ function Aplicacao() {
             ) : <span />}
             <SyncBadge sync={sync} onAbrir={() => setDetalheSync(true)} />
           </div>
+          {lembretes.length > 0 && (
+            <section style={{ background: C.due + "14", borderColor: C.due + "66" }} className="rounded-2xl border p-3 mb-3 space-y-2" aria-label="Lembretes">
+              {lembretes.slice(0, 5).map((l) => (
+                <div key={l.id} className="flex items-center gap-2">
+                  <span style={{ color: C.due }} className="text-base shrink-0" aria-hidden>🔔</span>
+                  <button onClick={() => setDetalhe(l.id)} className="flex-1 min-w-0 text-left">
+                    <span className="text-sm font-medium block truncate">{l.nome}</span>
+                    <span style={{ color: C.muted }} className="text-xs">{quandoVence(l.vencimento)} · <span style={{ fontFamily: MONO }}>{brl(l.valor)}</span></span>
+                  </button>
+                  <button onClick={() => pagar(l)} style={{ background: C.in, color: "#fff" }} className="rounded-lg px-2.5 py-1 text-xs shrink-0">Feito</button>
+                  <button onClick={() => up(l.id, { lembreteFechado: true })} aria-label={`Fechar lembrete de ${l.nome}`} style={{ color: C.muted }} className="p-1 shrink-0"><X size={16} /></button>
+                </div>
+              ))}
+              {lembretes.length > 5 && <p style={{ color: C.muted }} className="text-xs">e mais {lembretes.length - 5}</p>}
+            </section>
+          )}
           {tab === "mes" && <Mes {...ctx} />}
           {tab === "lancar" && <Lancar {...ctx} />}
           {tab === "futuro" && <Futuro {...ctx} />}
@@ -2465,7 +2497,9 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
   const [mais, setMais] = useState(false);
   const [deOutro, setDeOutro] = useState(false);   // "de quem é" aberto
   const [nomeNovo, setNomeNovo] = useState("");
-  const [outraTodo, setOutraTodo] = useState(false);   // "todo de" alguém que ainda não está na lista
+  const [outraTodo, setOutraTodo] = useState(false);
+  const [cada, setCada] = useState(1);              // conta fixa: a cada quantos meses
+  const [lembrar, setLembrar] = useState(null);     // null = sem lembrete; 0, 1, 3 = dias antes   // "todo de" alguém que ainda não está na lista
   const ontem = iso(new Date(Date.now() - 864e5));
   const modo = repetir ? "fixa" : nParc > 1 || parcelas === "" ? "parcelado" : "uma";
   const partes = dividir.length + 1;
@@ -2502,6 +2536,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
       status: pago ? "pago" : "pendente", pagamento: pago ? venc : null,
       parcelas: nParc > 1 ? nParc : undefined,
       ...(tipo === "entrada" && refFinal !== refAuto ? { ref: refFinal } : {}),
+      ...(lembrar != null && !pago ? { lembrarDias: lembrar } : {}),
     };
     const comConta = tipo === "transferencia" ? { ...base, contaId: instr, destinoId: destino }
       : credito ? { ...base, cartaoId: instr, contaId: null }
@@ -2524,14 +2559,16 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
         criarRecorrente({ id: recId, nome: pc.nome, valor: pc.valor, dia,
           catId: pc.catId, subId: pc.subId, forma: pc.forma,
           contaId: pc.contaId || undefined, cartaoId: pc.cartaoId || undefined,
-          deQuem: pc.deQuem || undefined, variavel: false, fim: fimRepeticao });
+          deQuem: pc.deQuem || undefined, variavel: false, fim: fimRepeticao,
+          ...(cada > 1 ? { cada, inicio: ym(venc) } : {}),
+          ...(lembrar != null ? { lembrarDias: lembrar } : {}) });
         return { ...pc, recId, src: `${recId}#${ym(venc)}` };
       }));
       flash("Virou uma conta fixa");
     } else {
       salvar(pedacos);
     }
-    dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null); setDeOutro(false); setOutraTodo(false);
+    dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null); setDeOutro(false); setOutraTodo(false); setCada(1); setLembrar(null);
     aoSalvar?.(continuar.current);
     continuar.current = false;
   };
@@ -2669,7 +2706,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
             <div className="flex flex-wrap gap-2 mb-2">
               <Chip ativo={modo === "uma"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); campo("parcelas", "1"); }}>Uma vez</Chip>
               <Chip ativo={modo === "parcelado"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); if (nParc < 2) campo("parcelas", "2"); }}>Parcelado</Chip>
-              <Chip ativo={modo === "fixa"} cor={C.saved} onClick={() => dispara({ tipo: "repetir", valor: true })}>Todo mês</Chip>
+              <Chip ativo={modo === "fixa"} cor={C.saved} onClick={() => dispara({ tipo: "repetir", valor: true })}>Recorrente</Chip>
             </div>
             {modo === "parcelado" && (
               <div className="flex items-center gap-2 mb-4">
@@ -2682,7 +2719,16 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
                 <span style={{ color: C.muted }} className="text-xs">o valor digitado é o total</span>
               </div>
             )}
-            {modo === "fixa" && (
+            {modo === "fixa" && (<>
+              <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                <span style={{ color: C.muted }} className="text-xs">a cada</span>
+                {[1, 2, 3, 6, 12].map((n) => (
+                  <Chip key={"c" + n} ativo={cada === n} cor={C.saved} onClick={() => setCada(n)}>{n === 1 ? "1 mês" : `${n} meses`}</Chip>
+                ))}
+                <span style={{ color: C.muted }} className="text-xs">ou</span>
+                <CampoInteiro valor={cada} onValor={(n) => setCada(n)} min={1} max={24}
+                  style={{ background: C.bg, borderColor: C.line }} className="w-12 rounded-lg border px-2 py-1 text-xs text-center outline-none" />
+              </div>
               <div className="flex flex-wrap items-center gap-1.5 mb-4">
                 {[["nunca", "Sem fim"], ["vezes", "Nº de vezes"], ["data", "Até uma data"]].map(([k, t]) => (
                   <Chip key={k} ativo={fimRepeticao.tipo === k} cor={C.saved}
@@ -2701,9 +2747,9 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
                     onValor={(n) => dispara({ tipo: "fimRepeticao", valor: { tipo: "vezes", vezes: n } })} min={1} max={99}
                     style={{ background: C.bg, borderColor: C.line }} className="w-16 rounded-lg border px-2 py-1 text-xs outline-none" />
                 )}
-                <span style={{ color: C.muted }} className="text-xs w-full">o valor digitado é o de cada mês</span>
+                <span style={{ color: C.muted }} className="text-xs w-full">o valor digitado é o de cada vez{cada > 1 ? ` · próximas: ${[1, 2].map((i) => mesLabel(ym(addMonths(venc, cada * i)))).join(", ")}` : ""}</span>
               </div>
-            )}
+            </>)}
             {modo === "uma" && <div className="mb-2" />}
 
             <Rotulo>De quem é</Rotulo>
@@ -2746,6 +2792,17 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
             )}
             {deQuem.trim() && <p style={{ color: C.tr }} className="text-xs mb-2">Entra na fatura, mas não conta como gasto seu. Vai para a cobrança de {deQuem}.</p>}
             <div className="mb-2" />
+          </>
+        )}
+
+        {(!pago || repetir) && (
+          <>
+            <Rotulo>Me lembrar</Rotulo>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {[[null, "Não"], [0, "No dia"], [1, "1 dia antes"], [3, "3 dias antes"]].map(([k, t]) => (
+                <Chip key={String(k)} ativo={lembrar === k} cor={C.due} onClick={() => setLembrar(k)}>{t}</Chip>
+              ))}
+            </div>
           </>
         )}
 
@@ -4503,7 +4560,12 @@ function AbaCartoes({ d, set, flash }) {
 function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aberta, setAberta] = useState(null);
   const [nova, setNova] = useState(false);
-  const upR = (id, patch) => set({ recorrentes: d.recorrentes.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
+  const upR = (id, patch) => set({
+    recorrentes: d.recorrentes.map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    // o lembrete vale também para as cobranças que já estão geradas
+    ...("lembrarDias" in patch ? { lancamentos: d.lancamentos.map((l) => (l.recId === id && l.status === "pendente"
+      ? { ...l, lembrarDias: patch.lembrarDias ?? undefined, lembreteFechado: undefined, editadoEm: new Date().toISOString() } : l)) } : {}),
+  });
   const contasUso = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
 
   const criar = () => {
@@ -4519,7 +4581,7 @@ function AbaRecorrentes({ d, set, flash, apagarRecorrencia, atualizarValorPenden
   return (
     <>
       <p style={{ color: C.muted }} className="text-sm mb-3">
-        Contas que se repetem todo mês. O app gera os próximos 12 meses sozinho;
+        Contas que se repetem (todo mês ou a cada alguns meses). O app gera os próximos 12 meses sozinho;
         as marcadas como variáveis vêm com aviso para você conferir o valor.
       </p>
 
@@ -4566,6 +4628,7 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
             dia {r.dia} · {cat?.nome || "—"} · {r.forma} · {via}
             {r.fim?.tipo === "data" && ` · até ${dm(r.fim.data)}`}
             {r.fim?.tipo === "vezes" && ` · ${r.fim.vezes}×`}
+            {(+r.cada || 1) > 1 && ` · a cada ${r.cada} meses`}
           </div>
         </div>
         {r.variavel && <Tag cor={C.due}>variável</Tag>}
@@ -4646,6 +4709,30 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
                 {contasUso.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
               </select>
             )}
+          </div>
+
+          <div><Rotulo>Repete a cada</Rotulo>
+            <div className="flex flex-wrap items-center gap-2">
+              {[1, 2, 3, 6, 12].map((n) => (
+                <Chip key={n} ativo={(+r.cada || 1) === n} cor={C.saved}
+                  onClick={() => upR(r.id, { cada: n, inicio: r.inicio || ym(d.lancamentos.filter((l) => l.recId === r.id && l.status === "pendente").map((l) => l.vencimento).sort()[0] || today()) })}>
+                  {n === 1 ? "1 mês" : `${n} meses`}</Chip>
+              ))}
+            </div>
+            {(+r.cada || 1) > 1 && r.inicio && (
+              <p style={{ color: C.muted }} className="text-xs mt-1">contando de {mesLabel(r.inicio)}.
+                <input type="month" value={r.inicio} onChange={(e) => e.target.value && upR(r.id, { inicio: e.target.value })} aria-label="Mês de início"
+                  style={{ background: C.bg, borderColor: C.line }} className="ml-2 rounded-lg border px-2 py-0.5 text-xs outline-none" /></p>
+            )}
+          </div>
+
+          <div><Rotulo>Me lembrar</Rotulo>
+            <div className="flex flex-wrap gap-2">
+              {[[null, "Não"], [0, "No dia"], [1, "1 dia antes"], [3, "3 dias antes"]].map(([k, t]) => (
+                <Chip key={String(k)} ativo={(r.lembrarDias ?? null) === k} cor={C.due} onClick={() => upR(r.id, { lembrarDias: k })}>{t}</Chip>
+              ))}
+            </div>
+            <p style={{ color: C.muted }} className="text-xs mt-1">Aparece no topo do app até você marcar como feito ou fechar.</p>
           </div>
 
           <div><Rotulo>O valor muda todo mês?</Rotulo>
@@ -5053,6 +5140,17 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
               </Campo>
             );
           })()}
+          {l.status === "pendente" && (
+            <Campo rot="Me lembrar">
+              <span className="inline-flex flex-wrap gap-1">
+                {[[null, "Não"], [0, "No dia"], [1, "1 dia antes"], [3, "3 dias antes"]].map(([k, t]) => (
+                  <button key={String(k)} onClick={() => up(l.id, { lembrarDias: k ?? undefined, lembreteFechado: undefined })}
+                    style={{ background: (l.lembrarDias ?? null) === k ? C.due : C.bg, color: (l.lembrarDias ?? null) === k ? "#fff" : C.muted, borderColor: C.line }}
+                    className="rounded-full border px-2 py-0.5 text-xs">{t}</button>
+                ))}
+              </span>
+            </Campo>
+          )}
           {cat && <Campo rot="Categoria">{cat.nome}{l.subId && subOf(l.catId, l.subId) ? ` · ${subOf(l.catId, l.subId).nome}` : ""}</Campo>}
           {l.forma && <Campo rot="Forma">{l.forma}</Campo>}
           {cartao && <Campo rot="Cartão">{cartao.nome}{cartao.dono !== "eu" ? ` (de ${cartao.dono})` : ""} · fecha {cartao.fecha}, vence {cartao.vence}</Campo>}
