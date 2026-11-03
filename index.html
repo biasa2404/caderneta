@@ -4274,7 +4274,9 @@ function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
     exportar();   // cópia de segurança antes de tudo
     const vEntrada = Math.max(0, num(entrada));
     const contas = d.contas.map((c) => {
-      const informado = saldos[c.id] != null && saldos[c.id] !== "" ? num(saldos[c.id]) : 0;
+      // caixinha deixada em branco guarda o saldo que já tinha (zerar não mexe no que está guardado)
+      const guardada = c.tipo === "caixinha" || c.tipo === "investimento";
+      const informado = saldos[c.id] != null && saldos[c.id] !== "" ? num(saldos[c.id]) : (guardada ? +saldoDaConta(d, c.id).toFixed(2) : 0);
       // a entrada é lançada (para o mês ter de onde partir), então sai do saldo de partida
       const ajuste = destinoEntrada && c.id === destinoEntrada.id ? vEntrada : 0;
       return { ...c, saldoInicial: +(informado - ajuste).toFixed(2) };
@@ -4305,7 +4307,7 @@ function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
             <span className="flex-1 text-sm">{c.nome}</span>
             <span style={{ color: C.muted }} className="text-xs">{c.tipo === "fisico" ? "espécie" : c.tipo}</span>
             <input value={saldos[c.id] ?? ""} onChange={(e) => setSaldos({ ...saldos, [c.id]: e.target.value })} inputMode="decimal"
-              placeholder="0,00" aria-label={`Saldo de ${c.nome}`}
+              placeholder={c.tipo === "caixinha" || c.tipo === "investimento" ? brl(saldoDaConta(d, c.id)).replace("R$ ", "") : "0,00"} aria-label={`Saldo de ${c.nome}`}
               style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-28 rounded-lg border px-2 py-1.5 text-sm text-right outline-none" />
           </div>
         ))}
