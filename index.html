@@ -1442,7 +1442,7 @@ function resumoCiclo(d, mes, hoje = today()) {
   const liquida = (c) => !!c && (c.tipo === "banco" || c.tipo === "fisico" || ehCaixinhaDeViver(c));
   const reserva = (c) => !!c && (c.tipo === "caixinha" || c.tipo === "investimento") && !ehCaixinhaDeViver(c);
   const novo = () => ({ feito: 0, falta: 0, itens: [] });
-  const g = { entradas: novo(), fixas: novo(), guardar: novo(), cartao: novo(), outros: novo(), deOutros: novo() };
+  const g = { entradas: novo(), fixas: novo(), guardar: novo(), cartao: novo(), outros: novo(), deOutros: novo(), cartaoFuturo: novo() };
   const porCat = {};
   let qtd = 0;
   // "Contas fixas" = recorrente sem data para acabar, ou da categoria Contas fixas.
@@ -1462,7 +1462,11 @@ function resumoCiclo(d, mes, hoje = today()) {
     } else {
       if (ehAnulado(l)) continue;
       if (ehAlheio(l)) alvo = g.deOutros;
-      else if (l.cartaoId) alvo = g.cartao;   // crédito vai sempre para o cartão, mesmo sendo fixa
+      // crédito vai sempre para o cartão, mesmo sendo fixa. Se a cobrança ainda
+      // não caiu (ex.: assinatura do dia 12), conta como comprometido e aparece
+      // no cartão só como aviso, em cinza: nunca nos dois totais
+      else if (l.cartaoId && !aconteceu(l, hoje)) { alvo = g.outros; g.cartaoFuturo.falta += v; g.cartaoFuturo.itens.push(l); }
+      else if (l.cartaoId) alvo = g.cartao;
       else if (ehFixa(l)) alvo = g.fixas;
       else alvo = g.outros;
       if (alvo !== g.deOutros && l.catId) porCat[l.catId] = (porCat[l.catId] || 0) + v;
@@ -3250,7 +3254,8 @@ function Mes(props) {
       itens: r.guardar.itens },
     { k: "cartao", sinal: "−", nome: "Compras no cartão", v: r.cartao.total, cor: C.due,
       det: r.cartao.total ? "dinheiro reservado para pagar a fatura" : "",
-      itens: r.cartao.itens },
+      cinza: r.cartaoFuturo.total ? `+ ${brl(r.cartaoFuturo.total)} ainda vai cair (já está em comprometidos)` : "",
+      itens: [...r.cartao.itens, ...r.cartaoFuturo.itens] },
     { k: "outros", sinal: "−", nome: "Gastos e comprometidos", v: r.outros.total, cor: C.out,
       det: r.outros.falta ? `${brl(r.outros.feito)} gasto · ${brl(r.outros.falta)} a sair` : "pix, débito e dinheiro",
       itens: r.outros.itens },
@@ -3296,13 +3301,14 @@ function Mes(props) {
 
         {/* de onde vem esse número */}
         <div style={{ borderColor: C.line }} className="mt-4 border-t">
-          {linhas.filter((x) => x.v || x.k === "entradas").map((x) => (
+          {linhas.filter((x) => x.v || x.cinza || x.k === "entradas").map((x) => (
             <button key={x.k} onClick={() => x.itens && ver(x.nome, x.itens)} disabled={!x.itens}
               style={{ borderColor: C.line }} className="w-full flex items-center gap-3 py-2.5 border-b text-left">
               <span style={{ color: x.cor, fontFamily: MONO }} className="w-4 text-center font-bold">{x.sinal}</span>
               <span className="flex-1 min-w-0">
                 <span className="text-sm block">{x.nome}</span>
                 {x.det && <span style={{ color: C.muted }} className="text-xs block truncate">{x.det}</span>}
+                {x.cinza && <span style={{ color: "#A3A8BA" }} className="text-xs block">{x.cinza}</span>}
               </span>
               <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(x.v)}</span>
             </button>
@@ -3396,7 +3402,7 @@ function Mes(props) {
             <span style={{ fontFamily: MONO, color: C.due }} className="text-xs font-semibold">{brl(somaC(aPagar))}</span>
           </div>
           <div className="space-y-2 mb-4">
-            {aPagar.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={() => pagarCerto(l)} plano />)}
+            {aPagar.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={l.cartaoId ? null : () => pagarCerto(l)} plano />)}
             {aReceber.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={() => pagar(l)} plano />)}
           </div>
         </>
