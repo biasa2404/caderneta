@@ -3248,6 +3248,13 @@ function Mes(props) {
         )}
       </section>
 
+      {r.entradas.total === 0 && !passou && (
+        <div style={{ background: C.due + "14", color: C.due }} className="rounded-xl px-3 py-2 text-xs mb-3">
+          Nenhuma entrada conta para {nomeMes(mes)} ainda, por isso o livre está negativo. Lance o salário que vai viver este mês
+          (se caiu no fim do mês passado, escolha "{nomeMes(mes)}" em "Este dinheiro é para viver em").
+        </div>
+      )}
+
       {/* pendências de meses passados */}
       {atrasados.length > 0 && (
         <section style={{ background: C.due + "12", borderColor: C.due + "55" }} className="rounded-2xl border p-4 mb-3">
@@ -4090,6 +4097,7 @@ function ComecarDoZero({ d, setD, exportar, flash, onClose }) {
   const destinoEntrada = bancos[0];
 
   const fazer = () => {
+    if (destinoEntrada && !(num(entrada) > 0)) { flash("Preencha quanto entrou para viver o mês — sem isso o livre fica negativo"); return; }
     if (confirmar.trim().toLowerCase() !== "zerar") { flash('Digite "zerar" para confirmar'); return; }
     exportar();   // cópia de segurança antes de tudo
     const vEntrada = Math.max(0, num(entrada));
