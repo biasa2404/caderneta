@@ -1445,6 +1445,11 @@ function resumoCiclo(d, mes, hoje = today()) {
   const g = { entradas: novo(), fixas: novo(), guardar: novo(), cartao: novo(), outros: novo(), deOutros: novo() };
   const porCat = {};
   let qtd = 0;
+  // "Contas fixas" = recorrente sem data para acabar, ou da categoria Contas fixas.
+  // Recorrente com fim (ex.: 6 vezes) é compromisso com prazo: fica com o cartão ou os gastos.
+  const recDe = Object.fromEntries((d.recorrentes || []).map((r) => [r.id, r]));
+  const catFixas = new Set((d.categorias || []).filter((c) => c.id === "fixas" || /contas?\s+fixas?/i.test(c.nome || "")).map((c) => c.id));
+  const ehFixa = (l) => catFixas.has(l.catId) || (!!l.recId && (recDe[l.recId]?.fim?.tipo || "nunca") === "nunca");
   for (const l of d.lancamentos || []) {
     if (cicloDe(l, dia) !== mes) continue;
     let alvo = null, v = emC(l.valor);
@@ -1457,8 +1462,8 @@ function resumoCiclo(d, mes, hoje = today()) {
     } else {
       if (ehAnulado(l)) continue;
       if (ehAlheio(l)) alvo = g.deOutros;
-      else if (l.recId) alvo = g.fixas;
-      else if (l.cartaoId) alvo = g.cartao;
+      else if (l.cartaoId) alvo = g.cartao;   // crédito vai sempre para o cartão, mesmo sendo fixa
+      else if (ehFixa(l)) alvo = g.fixas;
       else alvo = g.outros;
       if (alvo !== g.deOutros && l.catId) porCat[l.catId] = (porCat[l.catId] || 0) + v;
     }
@@ -1503,7 +1508,9 @@ function previsaoLivre(d, n = 6, hoje = today()) {
   const atual = ym(hoje);
   const passados = [1, 2, 3].map((i) => resumoCiclo(d, ym(addMonths(atual + "-01", -i)), hoje)).filter((r) => r.qtd > 0);
   const media = (f) => (passados.length ? passados.reduce((s, r) => s + f(r), 0) / passados.length : 0);
-  const semParcelas = (g) => somaC(g.itens.filter((l) => !l.grupo));
+  // parcelas e assinaturas no cartão já são certas: somam por fora da média do dia a dia
+  const certo = (l) => !!l.grupo || !!l.recId;
+  const semParcelas = (g) => somaC(g.itens.filter((l) => !certo(l)));
   const mediaEntrada = +media((r) => r.entradas.total).toFixed(2);
   const mediaDiaADia = +media((r) => semParcelas(r.cartao) + semParcelas(r.outros)).toFixed(2);
   const mediaGuardar = +media((r) => r.guardar.total).toFixed(2);
@@ -1519,7 +1526,7 @@ function previsaoLivre(d, n = 6, hoje = today()) {
         diaADia: +(r.gastoVariavel + r.reservadoLimites).toFixed(2), planejado,
         livre: +(r.livre - planejado).toFixed(2), estimouEntrada: false };
     }
-    const parcelas = somaC([...r.cartao.itens, ...r.outros.itens].filter((l) => l.grupo));
+    const parcelas = somaC([...r.cartao.itens, ...r.outros.itens].filter(certo));
     const conhecidos = semParcelas(r.cartao) + semParcelas(r.outros);
     const entrada = r.entradas.total || mediaEntrada;
     const guardar = r.guardar.total || mediaGuardar;
@@ -3573,7 +3580,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
           <p>* Entrada: quando o mês ainda não tem nada lançado, uso a média dos últimos {base.meses || 0} meses ({brl(base.mediaEntrada)}).</p>
           <p>Fixas: as contas fixas que o app já gerou para aquele mês.</p>
           <p>Caixinhas: o que está programado ou, sem nada programado, a média ({brl(base.mediaGuardar)}).</p>
-          <p>Dia a dia: parcelas já lançadas + o maior entre o que já está previsto e {base.somaLimites > 0 ? `a soma dos seus limites (${brl(base.somaLimites)})` : `a média de gastos sem contas fixas (${brl(base.mediaDiaADia)}). Com limites nas categorias a previsão fica mais certa`}.</p>
+          <p>Dia a dia: parcelas e assinaturas no cartão já lançadas + o maior entre o que já está previsto e {base.somaLimites > 0 ? `a soma dos seus limites (${brl(base.somaLimites)})` : `a média de gastos sem contas fixas (${brl(base.mediaDiaADia)}). Com limites nas categorias a previsão fica mais certa`}.</p>
           <p>Planejado: intenções com mês marcado (lá embaixo).</p>
         </div>
       )}
