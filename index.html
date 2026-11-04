@@ -109,6 +109,7 @@ const ChevronDown = ico(["m6 9 6 6 6-6"]);
 const AlertTriangle = ico(["m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z", "M12 9v4", "M12 17h0"]);
 const RotateCcw = ico(["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"]);
 const Lightbulb = ico(["M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5", "M9 18h6", "M10 22h4"]);
+const ListIcon = ico(["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"]);
 const Pencil = ico(["M21.2 2.8a2.7 2.7 0 0 0-3.8 0l-11 11L5 19l4.2-1.4 11-11a2.7 2.7 0 0 0 0-3.8z"]);
 const Copy = icoMix([
   ["rect", { width: 14, height: 14, x: 8, y: 8, rx: 2, ry: 2 }],
@@ -1529,7 +1530,9 @@ function previsaoLivre(d, n = 6, hoje = today()) {
   // parcelas e assinaturas no cartão já são certas: somam por fora da média do dia a dia
   const certo = (l) => !!l.grupo || !!l.recId;
   const semParcelas = (g) => somaC(g.itens.filter((l) => !certo(l)));
-  const mediaEntrada = +media((r) => r.entradas.total).toFixed(2);
+  // sem meses anteriores (ex.: começou do zero agora), o mês atual serve de referência
+  const rAtual = resumoCiclo(d, atual, hoje);
+  const mediaEntrada = passados.length ? +media((r) => r.entradas.total).toFixed(2) : rAtual.entradas.total;
   const mediaDiaADia = +media((r) => semParcelas(r.cartao) + semParcelas(r.outros)).toFixed(2);
   const mediaGuardar = +media((r) => r.guardar.total).toFixed(2);
   const somaLimites = somaC((d.categorias || []).filter((c) => c.id !== "renda"), (c) => +c.orcamento || 0);
@@ -1571,6 +1574,7 @@ function Aplicacao() {
   const [conta, setConta] = useState(null);      // id da caixinha aberta
   const [lancando, setLancando] = useState(false);   // painel do botão flutuante
   const [planejando, setPlanejando] = useState(null); // null | "novo" | o planejado sendo editado
+  const [vendoPlanejados, setVendoPlanejados] = useState(false);
   const [detalheSync, setDetalheSync] = useState(false);
   const [compartilhando, setCompartilhando] = useState(null);   // { quem, texto } | null
   const timer = useRef(null);
@@ -2087,7 +2091,41 @@ function Aplicacao() {
       </nav>
 
       {/* atalho para lançar de qualquer aba, sem rolar até o formulário */}
-      {!lancando && !planejando && !detalhe && !lista && !conta && !cfg && (
+      {tab === "futuro" && !lancando && !planejando && !vendoPlanejados && !detalhe && !lista && !conta && !cfg && (
+        <button onClick={() => setVendoPlanejados(true)} aria-label="Ver planejados" title="Ver planejados"
+          style={{ background: C.surface, color: C.due, borderColor: C.due, marginBottom: "env(safe-area-inset-bottom)" }}
+          className="fixed right-5 bottom-[9.5rem] md:bottom-24 z-40 w-11 h-11 rounded-full border shadow-md flex items-center justify-center active:scale-95 transition-transform">
+          <ListIcon size={19} />
+          {(d.intencoes || []).length > 0 && (
+            <span style={{ background: C.due }} className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full text-white text-[10px] font-bold flex items-center justify-center">{d.intencoes.length}</span>
+          )}
+        </button>
+      )}
+
+      {vendoPlanejados && (
+        <Painel titulo="Planejados" sub={`${brl(somaC(d.intencoes || []))} no total · toque para editar`} onClose={() => setVendoPlanejados(false)}>
+          {(d.intencoes || []).length === 0 && <Vazio>Nenhum planejado ainda.</Vazio>}
+          <div className="space-y-2 mb-3">
+            {(d.intencoes || []).slice().sort((a, b) => (a.quando || "9999").localeCompare(b.quando || "9999")).map((i) => (
+              <div key={i.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border border-dashed px-3 py-2.5 flex items-center gap-3">
+                <button onClick={() => { setVendoPlanejados(false); setPlanejando(i); }} className="flex-1 min-w-0 text-left flex items-center gap-3">
+                  <Lightbulb size={16} style={{ color: C.due }} className="shrink-0" />
+                  <span className="flex-1 min-w-0">
+                    <span className="text-sm block truncate">{i.nome}</span>
+                    <span style={{ color: C.muted }} className="text-xs">{i.quando ? mesLabel(i.quando) : "sem mês"}{i.obs ? ` · ${i.obs}` : ""}</span>
+                  </span>
+                  <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
+                </button>
+                <button onClick={() => { setVendoPlanejados(false); virouReal(i); }} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virou real</button>
+              </div>
+            ))}
+          </div>
+          <button onClick={() => { setVendoPlanejados(false); setPlanejando("novo"); }} style={{ borderColor: C.due, color: C.due }}
+            className="w-full rounded-xl border border-dashed py-2.5 text-sm flex items-center justify-center gap-1.5"><Lightbulb size={15} /> Novo planejado</button>
+        </Painel>
+      )}
+
+      {!lancando && !planejando && !vendoPlanejados && !detalhe && !lista && !conta && !cfg && (
         tab === "futuro"
           ? <button onClick={() => setPlanejando("novo")} aria-label="Novo planejado" title="Novo planejado"
               style={{ background: C.due, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
@@ -3745,6 +3783,7 @@ function FormPlanejado({ inicial, onSalvar, onApagar, onVirouReal }) {
 }
 
 /* ================================================================ futuro */
+const COR_PREV = { fixas: C.saved, caixinhas: "#7B8CC9", "dia a dia": C.due, planejado: "#E0A64A" };
 function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir, verLista, editarPlanejado, novoPlanejado, virouReal }) {
   const [janela, setJanela] = useState(12);
   const [de, setDe] = useState("");
@@ -3796,23 +3835,41 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold mb-1">Quanto vai sobrar</h2>
       <p style={{ color: C.muted }} className="text-sm mb-3">Estimativa de dinheiro livre nos próximos meses, com o que já está lançado e a sua média.</p>
       <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-2">
+        {/* a barra é o dinheiro que entra no mês, dividido em para onde ele vai; o verde é o que sobra */}
+        <div style={{ color: C.muted }} className="flex flex-wrap gap-x-3 gap-y-1 text-xs mb-1">
+          {[[C.saved, "fixas"], ["#7B8CC9", "caixinhas"], [C.due, "dia a dia"], ["#E0A64A", "planejado"], [C.in, "livre"], [C.out, "falta"]].map(([c, n]) => (
+            <span key={n} className="flex items-center gap-1"><span style={{ background: c }} className="w-2.5 h-2.5 rounded-sm inline-block" />{n}</span>
+          ))}
+        </div>
         {prev.map((p) => {
-          const maxAbs = Math.max(1, ...prev.map((x) => Math.abs(x.livre)));
+          // proporções sobre o que entra; se o gasto passa da entrada, a régua é o gasto e o vermelho é o que falta
+          const gastos = p.fixas + p.guardar + p.diaADia + p.planejado;
+          const regua = Math.max(1, p.entrada, gastos);
+          const pedacos = [[C.saved, p.fixas], ["#7B8CC9", p.guardar], [C.due, p.diaADia], ["#E0A64A", p.planejado],
+            p.livre >= 0 ? [C.in, p.livre] : [C.out, -p.livre]];
           return (
             <button key={p.mes} onClick={() => verLista({ titulo: `${mesLabel(p.mes)} · como fica`, sub: "Compromissos já lançados para este mês",
                 itens: d.lancamentos.filter((l) => cicloDe(l, diaVirada(d)) === p.mes) })}
               style={{ borderColor: C.line }} className="w-full text-left py-2.5 border-b last:border-b-0">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm font-medium capitalize">{nomeMes(p.mes)}{p.real && <span style={{ color: C.muted }} className="font-normal normal-case"> · agora</span>}</span>
+                <span className="text-sm font-medium capitalize">{nomeMes(p.mes)}<span style={{ color: C.muted }} className="font-normal normal-case"> · {p.real ? "agora" : "estimativa"}</span></span>
                 <span style={{ fontFamily: MONO, color: p.livre < 0 ? C.out : C.in }} className="text-sm font-bold">{brl(p.livre)}</span>
               </div>
-              <div style={{ background: C.bg }} className="h-1.5 rounded-full overflow-hidden my-1.5">
-                <div style={{ background: p.livre < 0 ? C.out : C.in, width: `${(Math.abs(p.livre) / maxAbs) * 100}%`, opacity: p.real ? 1 : 0.6 }} className="h-full rounded-full" />
+              <div style={{ background: C.bg }} className="h-3 rounded-full overflow-hidden my-1.5 flex"
+                aria-label={`de ${brl(p.entrada)} que entra, ${p.livre >= 0 ? `sobra ${brl(p.livre)}` : `faltam ${brl(-p.livre)}`}`}>
+                {pedacos.filter(([, v]) => v > 0).map(([c, v], i) => (
+                  <div key={i} style={{ background: c, width: `${(v / (p.livre < 0 ? gastos - p.livre : regua)) * 100}%` }} className="h-full" />
+                ))}
+              </div>
+              <div style={{ color: p.livre < 0 ? C.out : C.muted }} className="text-xs mb-1">
+                {p.livre >= 0
+                  ? `sobram ${Math.round((p.livre / Math.max(1, p.entrada)) * 100)}% do que entra`
+                  : `os gastos passam ${brl(-p.livre)} do que entra`}
               </div>
               <div style={{ color: C.muted }} className="grid grid-cols-2 gap-x-4 text-xs">
                 {[["entra", p.entrada, p.estimouEntrada ? "*" : ""], ["fixas", -p.fixas], ["caixinhas", -p.guardar], ["dia a dia", -p.diaADia],
                   ...(p.planejado ? [["planejado", -p.planejado]] : [])].map(([n, v, x]) => (
-                  <span key={n} className="flex justify-between"><span>{n}</span><span style={{ fontFamily: MONO }}>{v > 0 ? "+" : v < 0 ? "−" : ""}{brl(Math.abs(v)).replace("R$ ", "")}{x}</span></span>
+                  <span key={n} className="flex justify-between"><span className="flex items-center gap-1">{COR_PREV[n] && <span style={{ background: COR_PREV[n] }} className="w-2 h-2 rounded-sm inline-block" />}{n}</span><span style={{ fontFamily: MONO }}>{v > 0 ? "+" : v < 0 ? "−" : ""}{brl(Math.abs(v)).replace("R$ ", "")}{x}</span></span>
                 ))}
               </div>
             </button>
@@ -3822,7 +3879,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       <button onClick={() => setComoCalcula(!comoCalcula)} style={{ color: C.tr }} className="text-xs underline underline-offset-2 mb-2">{comoCalcula ? "esconder" : "como é calculado?"}</button>
       {comoCalcula && base && (
         <div style={{ color: C.muted }} className="text-xs mb-3 space-y-1">
-          <p>* Entrada: quando o mês ainda não tem nada lançado, uso a média dos últimos {base.meses || 0} meses ({brl(base.mediaEntrada)}).</p>
+          <p>* Entrada: quando o mês ainda não tem nada lançado, uso {base.meses ? `a média dos últimos ${base.meses} meses` : "o que entrou neste mês"} ({brl(base.mediaEntrada)}).</p>
           <p>Fixas: as contas fixas que o app já gerou para aquele mês.</p>
           <p>Caixinhas: o que está programado ou, sem nada programado, a média ({brl(base.mediaGuardar)}).</p>
           <p>Dia a dia: parcelas e assinaturas no cartão já lançadas + o maior entre o que já está previsto e {base.somaLimites > 0 ? `a soma dos seus limites (${brl(base.somaLimites)})` : `a média de gastos sem contas fixas (${brl(base.mediaDiaADia)}). Com limites nas categorias a previsão fica mais certa`}.</p>
@@ -3872,6 +3929,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       <div className="space-y-3">
         {meses.map(([k, ls], i) => {
           const tot = ls.filter((l) => l.status === "pendente").reduce((s, l) => s + emC(l.valor), 0) / 100;
+          const jaPago = ls.filter((l) => l.status === "pago").reduce((s, l) => s + emC(l.valor), 0) / 100;
           const aberto = !efetivos.includes(k);
           const pagas = ls.filter((l) => l.status === "pago").length;
           return (
@@ -3891,8 +3949,13 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
                     <span style={{ fontFamily: MONO, color: C.due }} className="font-semibold">{brl(tot)}</span>
                   </span>
                 </div>
-                <div style={{ background: C.bg }} className="h-1.5 rounded-full overflow-hidden">
-                  <div style={{ background: C.due, width: `${(tot / max) * 100}%` }} className="h-full" />
+                {/* barra do mês: verde o que já pagou, laranja o que falta pagar */}
+                <div style={{ background: C.bg }} className="h-2 rounded-full overflow-hidden flex">
+                  <div style={{ background: C.in, width: `${(jaPago / Math.max(0.01, jaPago + tot)) * 100}%` }} className="h-full" />
+                  <div style={{ background: C.due, width: `${(tot / Math.max(0.01, jaPago + tot)) * 100}%` }} className="h-full" />
+                </div>
+                <div style={{ color: C.muted }} className="text-xs mt-1">
+                  {jaPago > 0 ? `${brl(jaPago)} já pago · ${brl(tot)} falta pagar` : `${brl(tot)} falta pagar`}
                 </div>
               </div>
               {aberto && (
