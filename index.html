@@ -587,7 +587,8 @@ function gerar(d, meses = 24) {
       out.push({
         // o identificador vem do src, não é sorteado: assim celular e notebook
         // geram exatamente o mesmo registro e a sincronia não duplica nada
-        id: "r_" + src, src, recId: r.id, nome: r.nome, valor: ult ? ult.valor : r.valor, tipo: "saida",
+        id: "r_" + src, src, recId: r.id, nome: r.nome, valor: ult ? ult.valor : r.valor, tipo: r.tipo || "saida",
+        ...(r.tipo === "transferencia" ? { destinoId: r.destinoId } : {}),
         catId: r.catId, subId: r.subId, forma: r.forma, contaId: r.contaId || null, cartaoId: r.cartaoId || null,
         vencimento: venc, pagamento: null, status: "pendente", obs: "",
         // parte de outra pessoa numa assinatura dividida: todo mês vira cobrança
@@ -1573,6 +1574,7 @@ function Aplicacao() {
   const [lista, setLista] = useState(null);       // { titulo, sub, itens }
   const [conta, setConta] = useState(null);      // id da caixinha aberta
   const [lancando, setLancando] = useState(false);   // painel do botão flutuante
+  const [guardando, setGuardando] = useState(false); // painel "guardar dinheiro" (aba Guardado)
   const [planejando, setPlanejando] = useState(null); // null | "novo" | o planejado sendo editado
   const [vendoPlanejados, setVendoPlanejados] = useState(false);
   const [detalheSync, setDetalheSync] = useState(false);
@@ -2125,8 +2127,14 @@ function Aplicacao() {
         </Painel>
       )}
 
-      {!lancando && !planejando && !vendoPlanejados && !detalhe && !lista && !conta && !cfg && (
-        tab === "futuro"
+      {!lancando && !guardando && !planejando && !vendoPlanejados && !detalhe && !lista && !conta && !cfg && (
+        tab === "guardado"
+          ? <button onClick={() => setGuardando(true)} aria-label="Guardar dinheiro" title="Guardar dinheiro"
+              style={{ background: C.saved, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
+              className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
+              <PiggyBank size={26} />
+            </button>
+          : tab === "futuro"
           ? <button onClick={() => setPlanejando("novo")} aria-label="Novo planejado" title="Novo planejado"
               style={{ background: C.due, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
               className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
@@ -2137,6 +2145,13 @@ function Aplicacao() {
               className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
               <Plus size={26} />
             </button>
+      )}
+
+      {guardando && (
+        <Painel titulo="Guardar dinheiro" sub="um pagamento para você mesma: sai da conta e vai para a caixinha" onClose={() => setGuardando(false)}>
+          <FormLancamento d={d} catOf={catOf} salvar={salvar} criarRecorrente={criarRecorrente} flash={flash} guardar
+            aoSalvar={(outro) => { if (!outro) setGuardando(false); }} />
+        </Painel>
       )}
 
       {planejando && (
@@ -2585,8 +2600,9 @@ function reduzForm(e, a) {
         deQuem: t === "saida" ? e.deQuem : "",
         dividir: t === "saida" ? e.dividir : [],
         reemb: t === "saida" ? e.reemb : false,
-        repetir: t === "saida" ? e.repetir : false,
-        fimRepeticao: t === "saida" ? e.fimRepeticao : { tipo: "nunca" } };
+        repetir: t !== "entrada" ? e.repetir : false,
+        parcelas: t === "saida" ? e.parcelas : "1",
+        fimRepeticao: t !== "entrada" ? e.fimRepeticao : { tipo: "nunca" } };
     }
 
     case "trocarForma": {
@@ -2654,7 +2670,8 @@ function reduzForm(e, a) {
 /* ---------------------------------------------------- formulário de lançamento */
 /* Vive fora da aba para poder aparecer também no painel do botão flutuante:
    o mesmo formulário, com o mesmo comportamento, em dois lugares. */
-function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, inicial, editando, onEditado, onSubstituir }) {
+function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, inicial, editando, onEditado, onSubstituir, guardar }) {
+  /* guardar: o mesmo formulário, para pagar a si mesma — da conta para uma caixinha */
   /* editando: o mesmo formulário, já preenchido com o lançamento. Parcela de
      um parcelado e cobrança de uma recorrência têm regras próprias (abaixo). */
   const ed = editando || null;
@@ -2686,6 +2703,8 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     reemb: !ed.deQuem && (ed.reembolso === "aguardando" || ed.reembolso === "recebido"),
     deQuem: ed.deQuem || "", dividir: [], repetir: !!recEd, fimRepeticao: recEd?.fim || { tipo: "nunca" },
   });
+  const caixinhas = d.contas.filter((c) => (c.tipo === "caixinha" || c.tipo === "investimento") && !ehCaixinhaDeViver(c));
+  if (guardar) inicial = () => ({ tipo: "transferencia", forma: "Pix", catId: null, destino: caixinhas[0]?.id });
   const [f, despachar] = useMeuReducer(reduzForm, ref, (r) => (ed ? { ...formInicial(r), ...doEditado(r) }
     : inicial ? { ...formInicial(r), ...inicial(r) } : formInicial(r)));
   const dispara = (a) => despachar({ ...a, ref });
@@ -2732,10 +2751,11 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     if (v <= 0) { flash("Digite um valor maior que zero"); return; }
     if (forma === "Crédito" && !d.cartoes.length) { flash("Cadastre um cartão em Ajustes primeiro"); return; }
     if (tipo !== "transferencia" && !instr) { flash("Cadastre uma conta em Ajustes → Contas primeiro"); return; }
+    if (guardar && !destino) { flash("Crie uma caixinha em Ajustes → Contas primeiro"); return; }
     if (tipo === "transferencia" && (!instr || !destino)) { flash("Cadastre pelo menos duas contas em Ajustes → Contas primeiro"); return; }
     if (tipo === "transferencia" && instr === destino) { flash("Escolha contas diferentes"); return; }
     const base = {
-      tipo, nome: nome || (tipo === "transferencia" ? "Transferência" : catOf(catId).nome), valor: v,
+      tipo, nome: nome || (guardar ? `Guardar em ${d.contas.find((c) => c.id === destino)?.nome || "caixinha"}` : tipo === "transferencia" ? "Transferência" : catOf(catId).nome), valor: v,
       catId: tipo === "transferencia" ? null : catId, subId: tipo === "transferencia" ? null : subId,
       forma, vencimento: venc, obs, deQuem: deQuem.trim() || undefined,
       reembolso: deQuem.trim() || reemb ? "aguardando" : "nao",
@@ -2774,7 +2794,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
       if (!virouOutro) { onEditado({ campos: pedacos[0], modo, rep: { cada, fim: fimRepeticao, lembrar } }); return; }
       onSubstituir();
     }
-    if (repetir && tipo === "saida") {
+    if (repetir && tipo !== "entrada") {
       // cria a definição da conta fixa e, na mesma tacada, o lançamento deste
       // mês — com o mesmo "src" que gerar() usaria, para não duplicar no
       // próximo carregamento
@@ -2782,6 +2802,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
       salvar(pedacos.map((pc) => {
         const recId = uid();
         criarRecorrente({ id: recId, nome: pc.nome, valor: pc.valor, dia,
+          ...(pc.tipo === "transferencia" ? { tipo: "transferencia", destinoId: pc.destinoId } : {}),
           catId: pc.catId, subId: pc.subId, forma: pc.forma,
           contaId: pc.contaId || undefined, cartaoId: pc.cartaoId || undefined,
           deQuem: pc.deQuem || undefined, variavel: false, fim: fimRepeticao,
@@ -2789,7 +2810,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
           ...(lembrar != null ? { lembrarDias: lembrar } : {}) });
         return { ...pc, recId, src: `${recId}#${ym(venc)}` };
       }));
-      flash("Virou uma conta fixa");
+      flash(tipo === "transferencia" ? "Pronto: vai se repetir" : "Virou uma conta fixa");
     } else {
       salvar(pedacos);
     }
@@ -2802,17 +2823,17 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
 
   return (
       <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4">
-        <div style={{ background: C.bg }} className="flex p-1 rounded-xl mb-3">
+        {!guardar && <div style={{ background: C.bg }} className="flex p-1 rounded-xl mb-3">
           {[["saida", "Saída", ArrowUpRight], ["entrada", "Entrada", ArrowDownLeft], ["transferencia", "Transferência", ArrowLeftRight]].map(([k, t, Ic]) => (
             <button key={k} onClick={() => dispara({ tipo: "trocarTipo", valor: k })}
               style={{ background: tipo === k ? C.surface : "transparent", color: tipo === k ? CORTIPO[k] : C.muted }}
               className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs sm:text-sm font-medium">
               <Ic size={15} /> {t}</button>
           ))}
-        </div>
+        </div>}
 
         <div className="flex gap-2 mb-4">
-          {(tipo === "saida" ? [[true, credito ? "Já paguei a fatura" : "Já saiu"], [false, credito ? "Vai para a fatura" : "Vai sair"]]
+          {(guardar ? [[true, "Já guardei"], [false, "Vou guardar"]] : tipo === "saida" ? [[true, credito ? "Já paguei a fatura" : "Já saiu"], [false, credito ? "Vai para a fatura" : "Vai sair"]]
             : tipo === "entrada" ? [[true, "Recebido"], [false, "A receber"]]
             : [[true, "Já fiz"], [false, "Planejada"]]).map(([k, t]) => (
             <button key={t} onClick={() => campo("pago", k)}
@@ -2853,7 +2874,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
         )}
 
         <input value={nome} onChange={(e) => digitarNome(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()}
-          placeholder="Nome do lançamento" style={{ background: C.bg, borderColor: C.line }}
+          placeholder={guardar ? "Nome (opcional, ex.: reserva do mês)" : "Nome do lançamento"} style={{ background: C.bg, borderColor: C.line }}
           className="w-full rounded-xl border px-3 py-2.5 text-sm outline-none" />
 
         {sugestao ? (
@@ -2897,7 +2918,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
           </>
         )}
 
-        <Rotulo>{tipo === "transferencia" ? "De onde sai" : credito ? "Em qual cartão" : "De qual conta"}</Rotulo>
+        <Rotulo>{guardar ? "Sai de qual conta" : tipo === "transferencia" ? "De onde sai" : credito ? "Em qual cartão" : "De qual conta"}</Rotulo>
         <div className="flex flex-wrap gap-2 mb-4">
           {(credito ? d.cartoes : contasUso).map((c) => (
             <Chip key={c.id} ativo={instr === c.id} cor={credito ? C.due : C.saved} onClick={() => escolher("instr", c.id)}>
@@ -2908,16 +2929,16 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
 
         {tipo === "transferencia" && (
           <>
-            <Rotulo>Para onde vai</Rotulo>
+            <Rotulo>{guardar ? "Para qual caixinha" : "Para onde vai"}</Rotulo>
             <div className="flex flex-wrap gap-2 mb-4">
-              {d.contas.filter((c) => c.id !== instr).map((c) => (
+              {(guardar ? caixinhas : d.contas.filter((c) => c.id !== instr)).map((c) => (
                 <Chip key={c.id} ativo={destino === c.id} cor={C.tr} onClick={() => campo("destino", c.id)}>{c.nome}</Chip>
               ))}
             </div>
           </>
         )}
 
-        <Rotulo>{tipo === "saida" && credito ? "Data da compra" : pago ? "Quando" : tipo === "entrada" ? "Quando vai entrar" : "Quando vence"}</Rotulo>
+        <Rotulo>{tipo === "saida" && credito ? "Data da compra" : pago ? "Quando" : guardar ? "Quando vai guardar" : tipo === "entrada" ? "Quando vai entrar" : "Quando vence"}</Rotulo>
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <Chip ativo={venc === today()} cor={C.ink} onClick={() => campo("venc", today())}>Hoje</Chip>
           <Chip ativo={venc === ontem} cor={C.ink} onClick={() => campo("venc", ontem)}>Ontem</Chip>
@@ -2933,7 +2954,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
           </div>
         )}
 
-        {tipo === "saida" && (
+        {tipo !== "entrada" && (
           <>
             <Rotulo>Repete?</Rotulo>
             {parcelaEd ? (
@@ -2941,7 +2962,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
             ) : (
             <div className="flex flex-wrap gap-2 mb-2">
               <Chip ativo={modo === "uma"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); campo("parcelas", "1"); }}>{recEd ? "Parar de repetir" : "Uma vez"}</Chip>
-              {!recEd && <Chip ativo={modo === "parcelado"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); if (nParc < 2) campo("parcelas", "2"); }}>Parcelado</Chip>}
+              {!recEd && tipo === "saida" && <Chip ativo={modo === "parcelado"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); if (nParc < 2) campo("parcelas", "2"); }}>Parcelado</Chip>}
               <Chip ativo={modo === "fixa"} cor={C.saved} onClick={() => dispara({ tipo: "repetir", valor: true })}>Recorrente</Chip>
             </div>
             )}
@@ -2989,7 +3010,11 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
               </div>
             </>)}
             {modo === "uma" && <div className="mb-2" />}
+          </>
+        )}
 
+        {tipo === "saida" && (
+          <>
             <Rotulo>De quem é</Rotulo>
             <div className="flex flex-wrap gap-2 mb-2">
               <Chip ativo={!deQuem && !dividir.length && !outraTodo && !deOutro} cor={C.ink} onClick={() => { escolher("deQuem", ""); campo("dividir", []); setOutraTodo(false); setDeOutro(false); }}>Só meu</Chip>
@@ -5057,7 +5082,9 @@ function EditorRecorrente({ r, d, contasUso, aberta, onToggle, upR, onApagar, fl
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium truncate">{r.nome || "sem nome"}</div>
           <div style={{ color: C.muted }} className="text-xs truncate">
-            dia {r.dia} · {cat?.nome || "—"} · {r.forma} · {via}
+            {r.tipo === "transferencia"
+              ? <>dia {r.dia} · {via} → {d.contas.find((c) => c.id === r.destinoId)?.nome || "—"}</>
+              : <>dia {r.dia} · {cat?.nome || "—"} · {r.forma} · {via}</>}
             {r.fim?.tipo === "data" && ` · até ${dm(r.fim.data)}`}
             {r.fim?.tipo === "vezes" && ` · ${r.fim.vezes}×`}
             {(+r.cada || 1) > 1 && ` · a cada ${r.cada} meses`}
