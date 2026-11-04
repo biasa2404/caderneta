@@ -110,6 +110,7 @@ const AlertTriangle = ico(["m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h1
 const RotateCcw = ico(["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"]);
 const Lightbulb = ico(["M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5", "M9 18h6", "M10 22h4"]);
 const ListIcon = ico(["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"]);
+const Banknote = ico(["M2 6h20v12H2z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 12h.01", "M18 12h.01"]);
 const Pencil = ico(["M21.2 2.8a2.7 2.7 0 0 0-3.8 0l-11 11L5 19l4.2-1.4 11-11a2.7 2.7 0 0 0 0-3.8z"]);
 const Copy = icoMix([
   ["rect", { width: 14, height: 14, x: 8, y: 8, rx: 2, ry: 2 }],
@@ -291,7 +292,7 @@ window.storage = (() => {
 const COLECOES = ["lancamentos", "contas", "cartoes", "categorias", "recorrentes", "intencoes", "cancelados"];
 
 /* Chaves que são configuração do aparelho, não dado compartilhado. */
-const SO_LOCAL = ["sheetsUrl", "sheetsSegredo", "ateOnde", "painelAgora", "diaVirada", "v"];
+const SO_LOCAL = ["sheetsUrl", "sheetsSegredo", "ateOnde", "painelAgora", "diaVirada", "rendaEstimada", "v"];
 
 /** JSON.stringify(obj) com as chaves sempre na mesma ordem (alfabética),
     em qualquer profundidade. Sem isso, dois objetos com o mesmo conteúdo mas
@@ -1533,7 +1534,8 @@ function previsaoLivre(d, n = 6, hoje = today()) {
   const semParcelas = (g) => somaC(g.itens.filter((l) => !certo(l)));
   // sem meses anteriores (ex.: começou do zero agora), o mês atual serve de referência
   const rAtual = resumoCiclo(d, atual, hoje);
-  const mediaEntrada = passados.length ? +media((r) => r.entradas.total).toFixed(2) : rAtual.entradas.total;
+  const rendaFixa = +d.rendaEstimada > 0 ? +d.rendaEstimada : 0;   // Ajustes → Meu mês
+  const mediaEntrada = rendaFixa || (passados.length ? +media((r) => r.entradas.total).toFixed(2) : rAtual.entradas.total);
   const mediaDiaADia = +media((r) => semParcelas(r.cartao) + semParcelas(r.outros)).toFixed(2);
   const mediaGuardar = +media((r) => r.guardar.total).toFixed(2);
   const somaLimites = somaC((d.categorias || []).filter((c) => c.id !== "renda"), (c) => +c.orcamento || 0);
@@ -1556,7 +1558,7 @@ function previsaoLivre(d, n = 6, hoje = today()) {
     return { mes, real: false, entrada, fixas: r.fixas.total, guardar, diaADia, planejado,
       livre: +(entrada - r.fixas.total - guardar - diaADia - planejado).toFixed(2),
       estimouEntrada: !r.entradas.total };
-  }).map((x) => ({ ...x, base: { mediaEntrada, mediaDiaADia, somaLimites, mediaGuardar, meses: passados.length } }));
+  }).map((x) => ({ ...x, base: { mediaEntrada, rendaFixa, mediaDiaADia, somaLimites, mediaGuardar, meses: passados.length } }));
 }
 
 /* ================================================================== app */
@@ -2024,7 +2026,7 @@ function Aplicacao() {
 
   const tabs = [
     { id: "mes", nome: "Mês", icon: Wallet }, { id: "lancar", nome: "Extrato", icon: Repeat },
-    { id: "futuro", nome: "Futuro", icon: CalendarClock }, { id: "guardado", nome: "Guardado", icon: PiggyBank },
+    { id: "futuro", nome: "Futuro", icon: CalendarClock }, { id: "contas", nome: "Contas", icon: Banknote }, { id: "guardado", nome: "Guardado", icon: PiggyBank },
     { id: "relatorio", nome: "Relatórios", icon: PieIcon },
   ];
 
@@ -2080,6 +2082,7 @@ function Aplicacao() {
           {tab === "futuro" && <Futuro {...ctx} />}
           {tab === "guardado" && <Guardado {...ctx} />}
           {tab === "relatorio" && <Relatorio {...ctx} />}
+          {tab === "contas" && <OndeEsta {...ctx} />}
         </main>
       </div>
 
@@ -3904,7 +3907,7 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
       <button onClick={() => setComoCalcula(!comoCalcula)} style={{ color: C.tr }} className="text-xs underline underline-offset-2 mb-2">{comoCalcula ? "esconder" : "como é calculado?"}</button>
       {comoCalcula && base && (
         <div style={{ color: C.muted }} className="text-xs mb-3 space-y-1">
-          <p>* Entrada: quando o mês ainda não tem nada lançado, uso {base.meses ? `a média dos últimos ${base.meses} meses` : "o que entrou neste mês"} ({brl(base.mediaEntrada)}).</p>
+          <p>* Entrada: quando o mês ainda não tem nada lançado, uso {base.rendaFixa ? "a renda estimada de Ajustes → Meu mês" : base.meses ? `a média dos últimos ${base.meses} meses` : "o que entrou neste mês"} ({brl(base.mediaEntrada)}).</p>
           <p>Fixas: as contas fixas que o app já gerou para aquele mês.</p>
           <p>Caixinhas: o que está programado ou, sem nada programado, a média ({brl(base.mediaGuardar)}).</p>
           <p>Dia a dia: parcelas e assinaturas no cartão já lançadas + o maior entre o que já está previsto e {base.somaLimites > 0 ? `a soma dos seus limites (${brl(base.somaLimites)})` : `a média de gastos sem contas fixas (${brl(base.mediaDiaADia)}). Com limites nas categorias a previsão fica mais certa`}.</p>
@@ -4230,252 +4233,205 @@ function ConfigRelatorio({ d, catOf, periodoInicial, flash, onClose }) {
   );
 }
 
-function Relatorio({ d, catOf, anulado, alheio, M, verLista, flash }) {
-  const fora = (l) => anulado(l) || alheio(l);   // não conta como gasto seu
-  const historico = useMemo(() => mesesComMovimento(d, 12), [d.lancamentos]);
-  const linhaTempo = useMemo(() => evolucao(d, historico), [d, historico]);
-  const resumo = useMemo(() => resumoDoMes(d, M, catOf), [d, M]);
-  const comparacao = useMemo(() => compararMeses(d, M, resumo.anterior, catOf), [d, M]);
+/* ============================================================== contas */
+/** Quanto tem em cada lugar agora: bancos, espécie (capinha, carteira) e, de resumo, o guardado. */
+function OndeEsta({ d, saldoConta, verConta, salvar, flash, abrirAjustes, totalGuardado, totalInvestido }) {
+  const [conferindo, setConferindo] = useState(false);
+  const grupos = [
+    ["Bancos", d.contas.filter((c) => c.tipo === "banco"), C.in],
+    ["Em espécie", d.contas.filter((c) => c.tipo === "fisico"), C.due],
+  ];
+  const liquidas = d.contas.filter((c) => c.tipo === "banco" || c.tipo === "fisico");
+  const totLiquido = somaC(liquidas, (c) => saldoConta(c.id));
+  const totGuardado = (totalGuardado || 0) + (totalInvestido || 0);
+  const maior = Math.max(1, ...liquidas.map((c) => Math.abs(saldoConta(c.id))));
+  return (
+    <>
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
+        <div style={{ color: C.muted }} className="text-xs uppercase tracking-wider">Dá para usar agora</div>
+        <div style={{ fontFamily: MONO, color: totLiquido < 0 ? C.out : C.ink }} className="text-3xl font-bold">{brl(totLiquido)}</div>
+        <div style={{ color: C.muted }} className="text-xs mb-3">bancos e espécie, pelo que está lançado · + {brl(totGuardado)} guardado nas caixinhas</div>
+        <button onClick={() => setConferindo(true)} style={{ background: C.ink, color: "#fff" }} className="w-full rounded-xl py-2.5 text-sm">Conferir com o banco</button>
+      </section>
+      {grupos.filter(([, cs]) => cs.length).map(([nome, cs, cor]) => (
+        <section key={nome} className="mb-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <Rotulo>{nome}</Rotulo>
+            <span style={{ fontFamily: MONO, color: C.muted }} className="text-xs font-semibold">{brl(somaC(cs, (c) => saldoConta(c.id)))}</span>
+          </div>
+          <div className="space-y-2">
+            {cs.map((c) => {
+              const v = saldoConta(c.id);
+              return (
+                <button key={c.id} onClick={() => verConta(c.id)} style={{ background: C.surface, borderColor: C.line }}
+                  className="w-full text-left rounded-xl border px-4 py-3">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-sm font-medium min-w-0 truncate">{c.nome}</span>
+                    <span style={{ fontFamily: MONO, color: v < 0 ? C.out : C.ink }} className="text-base font-bold whitespace-nowrap">{brl(v)}</span>
+                  </div>
+                  <div style={{ background: C.bg }} className="h-1.5 rounded-full overflow-hidden mt-2">
+                    <div style={{ background: v < 0 ? C.out : cor, width: `${(Math.abs(v) / maior) * 100}%` }} className="h-full" />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+      <p style={{ color: C.muted }} className="text-xs mb-2">Toque numa conta para ver tudo que entrou e saiu dela. As caixinhas ficam na aba Guardado.</p>
+      <button onClick={() => abrirAjustes("contas")} style={{ color: C.tr }} className="text-xs underline underline-offset-2">adicionar ou mudar contas</button>
+      {conferindo && <ConferirSaldo contas={liquidas} saldoConta={saldoConta} salvar={salvar} flash={flash} onClose={() => setConferindo(false)} />}
+    </>
+  );
+}
 
+/* ============================================================ relatório */
+/** Relatório no mesmo "mês de vida" da aba Mês: o salário do dia 30 conta no mês que ele paga. */
+function Relatorio({ d, catOf, verLista, flash }) {
+  const hoje = today();
+  const [mes, setMes] = useState(ym(hoje));
+  const [nHist, setNHist] = useState(6);
   const [configAberto, setConfigAberto] = useState(false);
-  const [janela, setJanela] = useState(1);
-  const [de, setDe] = useState("");
-  const [ate, setAte] = useState("");
+  const r = useMemo(() => resumoCiclo(d, mes, hoje), [d, mes]);
+  const rAnt = useMemo(() => resumoCiclo(d, mesAnterior(mes), hoje), [d, mes]);
+  const ehAtual = mes === ym(hoje);
 
-  /* período avaliado, em meses ------------------------------------------ */
-  const periodo = useMemo(() => {
-    if (de && ate && de <= ate) {
-      const ms = [];
-      let k = de + "-01";
-      while (ym(k) <= ate) { ms.push(ym(k)); k = addMonths(k, 1); }
-      return ms;
-    }
-    return Array.from({ length: janela }, (_, i) => ym(addMonths(today(), -(janela - 1 - i))));
-  }, [janela, de, ate]);
+  const gastos = (x) => [...x.fixas.itens, ...x.cartao.itens, ...x.outros.itens];
+  const entrou = r.entradas.total;
+  const saiu = +(r.fixas.total + r.cartao.total + r.outros.total).toFixed(2);
+  const guardou = r.guardar.total;
+  const sobra = +(entrou - saiu - guardou).toFixed(2);
 
-  const dentro = (l) => periodo.includes(ym(l.pagamento || l.vencimento));
-  const rotulo = periodo.length === 1 ? mesLabel(periodo[0]) : `${mesLabel(periodo[0])} — ${mesLabel(periodo[periodo.length - 1])}`;
+  // por categoria, com o limite e a comparação com o mês anterior
+  const porCatAnt = rAnt.porCat || {};
+  const cats = d.categorias.filter((c) => c.id !== "renda").map((c) => ({
+    ...c, gasto: (r.porCat[c.id] || 0) / 100, antes: (porCatAnt[c.id] || 0) / 100, limite: +c.orcamento || 0,
+  })).filter((c) => c.gasto > 0 || c.antes > 0 || c.limite > 0).sort((a, b) => b.gasto - a.gasto);
+  const totCat = cats.reduce((s, c) => s + c.gasto, 0) || 1;
+  const maiorCat = cats[0];
+  const subiu = cats.filter((c) => c.antes > 0).sort((a, b) => (b.gasto - b.antes) - (a.gasto - a.antes))[0];
+  const estouradas = cats.filter((c) => c.limite > 0 && c.gasto > c.limite);
+  const itensCat = (id) => gastos(r).filter((l) => l.catId === id);
 
-  const pagos = d.lancamentos.filter((l) => l.status === "pago" && l.tipo !== "transferencia" && dentro(l));
-  const saidas = pagos.filter((l) => l.tipo === "saida");
+  // últimos meses, no mesmo jeito de contar
+  const hist = useMemo(() => Array.from({ length: nHist }, (_, i) => {
+    const k = ym(addMonths(mes + "-01", -(nHist - 1 - i)));
+    const x = resumoCiclo(d, k, hoje);
+    return { mes: mesCurto(k), chave: k, Entrou: x.entradas.total, Gastou: +(x.fixas.total + x.cartao.total + x.outros.total).toFixed(2), Guardou: x.guardar.total, qtd: x.qtd };
+  }), [d, mes, nHist]);
+  const comDados = hist.filter((h) => h.qtd > 0);
+  const mediaGasto = comDados.length ? comDados.reduce((s, h) => s + h.Gastou, 0) / comDados.length : 0;
 
-  const orcamentos = d.categorias.filter((c) => c.id !== "renda").map((c) => {
-    const ls = saidas.filter((l) => l.catId === c.id);
-    return { ...c,
-      teto: (c.orcamento || 0) * periodo.length,
-      gasto: ls.filter((l) => !fora(l)).reduce((s, l) => s + emC(l.valor), 0) / 100,
-      reemb: ls.filter((l) => fora(l)).reduce((s, l) => s + emC(l.valor), 0) / 100 };
-  }).sort((a, b) => (b.gasto / (b.teto || 1)) - (a.gasto / (a.teto || 1)));
-
-  const totReemb = saidas.filter(fora).reduce((s, l) => s + emC(l.valor), 0) / 100;
-  const porCat = orcamentos.filter((c) => c.gasto > 0).map((c) => ({ name: c.nome, value: +c.gasto.toFixed(2), cor: c.cor }));
-  if (totReemb > 0) porCat.push({ name: "Não é meu", value: +totReemb.toFixed(2), cor: C.line });
-
-  const doMesK = (k) => d.lancamentos.filter((l) => l.status === "pago" && l.tipo !== "transferencia" && ym(l.pagamento || l.vencimento) === k);
-
-  const porMes = useMemo(() => periodo.map((k) => {
-    const ls = doMesK(k);
-    return {
-      mes: mesLabel(k), chave: k,
-      Entrou: +ls.filter((l) => l.tipo === "entrada").reduce((s, l) => s + emC(l.valor), 0) / 100,
-      Saiu: +ls.filter((l) => l.tipo === "saida" && !fora(l)).reduce((s, l) => s + emC(l.valor), 0) / 100,
-      "Não é meu": +ls.filter((l) => l.tipo === "saida" && fora(l)).reduce((s, l) => s + emC(l.valor), 0) / 100,
-    };
-  }), [d, periodo]);
-
-  const entrou = pagos.filter((l) => l.tipo === "entrada").reduce((s, l) => s + emC(l.valor), 0) / 100;
-  const saiu = saidas.filter((l) => !fora(l)).reduce((s, l) => s + emC(l.valor), 0) / 100;
-  const totTeto = somaC(orcamentos, (c) => c.teto);
-  const media = (v) => v / periodo.length;
+  const frases = [];
+  if (maiorCat && maiorCat.gasto > 0) frases.push(<>O que mais pesou foi <b style={{ color: C.ink }}>{maiorCat.nome}</b>: {brl(maiorCat.gasto)} ({Math.round((maiorCat.gasto / totCat) * 100)}% dos gastos).</>);
+  if (subiu && subiu.gasto - subiu.antes > 0.009) frases.push(<><b style={{ color: C.out }}>{subiu.nome}</b> subiu {brl(subiu.gasto - subiu.antes)} em relação a {nomeMes(mesAnterior(mes))}.</>);
+  if (estouradas.length) frases.push(<>Passou do limite em <b style={{ color: C.out }}>{estouradas.map((c) => c.nome).join(", ")}</b>.</>);
+  if (entrou > 0) frases.push(sobra >= 0
+    ? <>De cada R$ 100 que entraram, sobraram <b style={{ color: C.in }}>R$ {Math.round((sobra / entrou) * 100)}</b>{guardou > 0 ? <> e você guardou R$ {Math.round((guardou / entrou) * 100)}</> : null}.</>
+    : <>Os gastos passaram {brl(-sobra)} do que entrou.</>);
+  if (comDados.length > 1 && mediaGasto > 0) frases.push(<>Sua média de gastos nos últimos meses é {brl(mediaGasto)}.</>);
 
   return (
     <>
-      {/* o mês em uma frase ------------------------------------------- */}
-      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4 no-print-break">
-        <div className="flex items-baseline justify-between mb-3">
-          <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold capitalize">{mesLabel(M)}</h2>
-          <button onClick={() => setConfigAberto(true)} style={{ borderColor: C.line, color: C.muted }}
-            className="rounded-full border px-3 py-1 text-xs esconder-na-impressao flex items-center gap-1.5">
-            <Download size={13} /> Relatório
-          </button>
+      {/* troca de mês */}
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={() => setMes(mesAnterior(mes))} aria-label="Mês anterior" style={{ background: C.surface, borderColor: C.line }}
+          className="w-10 h-10 rounded-full border flex items-center justify-center"><ChevronDown size={18} style={{ transform: "rotate(90deg)" }} /></button>
+        <div className="text-center">
+          <div style={{ fontFamily: DISPLAY }} className="text-xl font-bold capitalize">{nomeMes(mes)} {mes.slice(0, 4) !== hoje.slice(0, 4) ? mes.slice(0, 4) : ""}</div>
+          <div style={{ color: C.muted }} className="text-xs">{ehAtual ? "até agora, contando o que ainda vai sair" : "relatório do mês"}</div>
         </div>
-
-        <div className="grid grid-cols-3 gap-3 mb-3">
-          <Resumo rot="Entrou" v={resumo.entradas} cor={C.in} />
-          <Resumo rot="Saiu" v={resumo.saidas} cor={C.out} />
-          <Resumo rot={resumo.sobra >= 0 ? "Sobrou" : "Faltou"} v={Math.abs(resumo.sobra)} cor={resumo.sobra >= 0 ? C.saved : C.out} />
-        </div>
-
-        <ul style={{ color: C.muted }} className="text-sm space-y-1">
-          {resumo.maior && (
-            <li>O que mais pesou foi <b style={{ color: C.ink }}>{resumo.maior.nome}</b>, com {brl(resumo.maior.atual)}.</li>
-          )}
-          {resumo.subiu && resumo.subiu.delta > 0 && (
-            <li><b style={{ color: C.out }}>{resumo.subiu.nome}</b> subiu {brl(resumo.subiu.delta)}
-              {resumo.subiu.pct != null && ` (${resumo.subiu.pct}%)`} em relação a {mesLabel(resumo.anterior)}.</li>
-          )}
-          {resumo.caiu && resumo.caiu.delta < 0 && (
-            <li><b style={{ color: C.in }}>{resumo.caiu.nome}</b> caiu {brl(-resumo.caiu.delta)}
-              {resumo.caiu.pct != null && ` (${Math.abs(resumo.caiu.pct)}%)`}.</li>
-          )}
-          {resumo.folga != null && (
-            <li>Com o que está guardado, você cobre <b style={{ color: C.ink }}>{resumo.folga} {resumo.folga === 1 ? "mês" : "meses"}</b> no
-              seu ritmo de gasto ({brl(resumo.gastoMedio)} por mês).</li>
-          )}
-        </ul>
-      </section>
-
-      {/* como o dinheiro evoluiu --------------------------------------- */}
-      {linhaTempo.length >= 2 && (
-        <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4 no-print-break">
-          <h3 style={{ color: C.muted }} className="text-xs uppercase tracking-wider mb-2">Como seu dinheiro cresceu</h3>
-          <Evolucao dados={linhaTempo} series={[
-            { chave: "liquido", rot: "Em conta", cor: C.in },
-            { chave: "guardado", rot: "Guardado", cor: C.saved },
-            { chave: "investido", rot: "Investido", cor: C.inv },
-          ]} />
-        </section>
-      )}
-
-      {/* este mês contra o passado -------------------------------------- */}
-      {comparacao.length > 0 && (
-        <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4 no-print-break">
-          <h3 style={{ color: C.muted }} className="text-xs uppercase tracking-wider mb-3">
-            {mesLabel(M)} contra {mesLabel(resumo.anterior)}
-          </h3>
-          <div className="space-y-2">
-            {comparacao.map((c) => (
-              <div key={c.id} onClick={() => verLista({ titulo: c.nome, sub: mesLabel(M),
-                  itens: d.lancamentos.filter((l) => l.catId === c.id && l.status === "pago" && ym(l.pagamento || l.vencimento) === M) })}
-                role="button" tabIndex={0} className="flex items-center gap-3 cursor-pointer">
-                <span style={{ background: c.cor }} className="w-1.5 h-8 rounded-full shrink-0" />
-                <span className="text-sm flex-1 min-w-0 truncate">{c.nome}</span>
-                <span style={{ fontFamily: MONO, color: C.muted }} className="text-xs shrink-0">{brl(c.antes)}</span>
-                <span style={{ color: C.muted }} className="text-xs shrink-0">→</span>
-                <span style={{ fontFamily: MONO }} className="text-sm font-semibold shrink-0 w-20 text-right">{brl(c.atual)}</span>
-                <span style={{ color: c.delta > 0 ? C.out : c.delta < 0 ? C.in : C.muted, fontFamily: MONO }}
-                  className="text-xs shrink-0 w-16 text-right">
-                  {c.delta === 0 ? "—" : (c.delta > 0 ? "+" : "") + brl(c.delta).replace("R$ ", "")}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* seletor de período ------------------------------------------- */}
-      <div className="flex flex-wrap items-center gap-2 mb-2 esconder-na-impressao">
-        {[[1, "Este mês"], [3, "3 meses"], [4, "4 meses"], [6, "6 meses"], [12, "12 meses"]].map(([n, t]) => (
-          <Chip key={n} ativo={!(de && ate) && janela === n} cor={C.ink} onClick={() => { setJanela(n); setDe(""); setAte(""); }}>{t}</Chip>
-        ))}
-        <input type="month" value={de} onChange={(e) => setDe(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
-          className="rounded-full border px-3 py-1.5 text-xs outline-none" />
-        <span style={{ color: C.muted }} className="text-xs">até</span>
-        <input type="month" value={ate} onChange={(e) => setAte(e.target.value)} style={{ background: C.surface, borderColor: C.line }}
-          className="rounded-full border px-3 py-1.5 text-xs outline-none" />
-        <AvisoIntervalo de={de} ate={ate} />
-      </div>
-      <p style={{ color: C.muted }} className="text-xs mb-4 capitalize">
-        {rotulo}{periodo.length > 1 ? ` · ${periodo.length} meses` : ""}
-      </p>
-
-      {/* totais -------------------------------------------------------- */}
-      <div className="grid grid-cols-3 gap-2 mb-4">
-        {[["Entrou", entrou, C.in], ["Saiu", saiu, C.out], ["Sobrou", entrou - saiu, entrou - saiu < 0 ? C.out : C.ink]].map(([n, v, c]) => (
-          <div key={n} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border p-3">
-            <div style={{ color: C.muted }} className="text-xs">{n}</div>
-            <div style={{ fontFamily: MONO, color: c }} className="font-semibold text-sm sm:text-base">{brl(v)}</div>
-            {periodo.length > 1 && <div style={{ fontFamily: MONO, color: C.muted }} className="text-xs">{brl(media(v))}/mês</div>}
-            {n === "Saiu" && totReemb > 0 && <div style={{ fontFamily: MONO, color: C.muted }} className="text-xs">+{brl(totReemb)} não é meu</div>}
-          </div>
-        ))}
+        <button onClick={() => setMes(mesSeguinte(mes))} aria-label="Próximo mês" style={{ background: C.surface, borderColor: C.line }}
+          className="w-10 h-10 rounded-full border flex items-center justify-center"><ChevronDown size={18} style={{ transform: "rotate(-90deg)" }} /></button>
       </div>
 
-      {/* orçamento ----------------------------------------------------- */}
-      <div style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
-        <div className="flex items-baseline justify-between mb-3">
-          <h3 style={{ fontFamily: DISPLAY }} className="font-bold">Orçamento por categoria</h3>
-          <span style={{ fontFamily: MONO, color: C.muted }} className="text-xs">{brl(saiu)} de {brl(totTeto)}</span>
+      {/* o mês em números e em frases */}
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          {[["Entrou", entrou, C.in, r.entradas.itens], ["Gastou", saiu, C.out, gastos(r)], ["Guardou", guardou, C.saved, r.guardar.itens],
+            [sobra >= 0 ? "Sobrou" : "Faltou", Math.abs(sobra), sobra >= 0 ? C.ink : C.out, null]].map(([n, v, c, itens]) => (
+            <button key={n} disabled={!itens} onClick={() => itens && verLista({ titulo: `${n} · ${nomeMes(mes)}`, itens })}
+              style={{ background: C.bg }} className="rounded-xl p-3 text-left">
+              <div style={{ color: C.muted }} className="text-xs">{n}</div>
+              <div style={{ fontFamily: MONO, color: c }} className="font-bold">{brl(v)}</div>
+            </button>
+          ))}
         </div>
-        <div className="space-y-3">
-          {orcamentos.map((c) => {
-            const pct = c.teto ? Math.min((c.gasto / c.teto) * 100, 100) : 0;
-            const estourou = c.teto > 0 && c.gasto > c.teto;
-            return (
-              <div key={c.id} onClick={() => verLista({
-                  titulo: c.nome,
-                  sub: `${rotulo} · ${c.teto ? `limite ${brl(c.teto)}` : "sem limite"}`,
-                  itens: saidas.filter((l) => l.catId === c.id),
-                })}
-                role="button" tabIndex={0}
-                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), verLista({
-                  titulo: c.nome, sub: rotulo, itens: saidas.filter((l) => l.catId === c.id) }))}
-                className="cursor-pointer">
-                <div className="flex items-baseline justify-between text-sm mb-1">
-                  <span className="flex items-center gap-2">
-                    <span style={{ background: c.cor }} className="w-2.5 h-2.5 rounded-full" />{c.nome}
-                    {estourou && <span style={{ color: C.out }} className="text-xs flex items-center gap-0.5"><AlertTriangle size={11} /> estourou</span>}
-                  </span>
-                  <span style={{ fontFamily: MONO, color: estourou ? C.out : C.muted }} className="text-xs">
-                    {brl(c.gasto)}{c.reemb > 0 ? ` (+${brl(c.reemb)} não é meu)` : ""}{c.teto ? ` / ${brl(c.teto)}` : " · sem limite"}
-                  </span>
-                </div>
-                <div style={{ background: C.bg }} className="h-2 rounded-full overflow-hidden flex">
-                  <div style={{ background: estourou ? C.out : c.cor, width: `${pct}%` }} className="h-full" />
-                  {c.teto > 0 && c.reemb > 0 && (
-                    <div style={{ background: C.line, width: `${Math.min((c.reemb / c.teto) * 100, 100 - pct)}%` }} className="h-full" />
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <p style={{ color: C.muted }} className="text-xs mt-3">
-          {periodo.length > 1
-            ? `Limite mensal multiplicado pelos ${periodo.length} meses do período.`
-            : "Reinicia todo dia 1º. O que sobra não acumula."}
-        </p>
-      </div>
-
-      {/* pizza --------------------------------------------------------- */}
-      <div style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
-        <h3 style={{ fontFamily: DISPLAY }} className="font-bold mb-1">Para onde foi o dinheiro</h3>
-        {porCat.length === 0 ? <Vazio>Sem gastos pagos neste período.</Vazio> : (
-          <div className="flex flex-col sm:flex-row items-center gap-4">
-            <div className="w-full sm:w-52 h-52">
-              <Rosca dados={porCat} onFatia={(f) => verLista({ titulo: f.name, sub: rotulo, itens: f.name === "Não é meu" ? saidas.filter(fora) : saidas.filter((l) => catOf(l.catId)?.nome === f.name && !fora(l)) })} />
-            </div>
-            <div className="flex-1 w-full space-y-1.5">
-              {porCat.map((c) => (
-                <div key={c.name} className="flex items-center gap-2 text-sm cursor-pointer" role="button" tabIndex={0}
-                  onClick={() => verLista({ titulo: c.name, sub: rotulo,
-                    itens: c.name === "Não é meu" ? saidas.filter(fora)
-                      : saidas.filter((l) => catOf(l.catId)?.nome === c.name && !fora(l)) })}>
-                  <span style={{ background: c.cor }} className="w-2.5 h-2.5 rounded-full shrink-0" />
-                  <span className="flex-1 truncate">{c.name}</span>
-                  <span style={{ fontFamily: MONO, color: C.muted }} className="text-xs">
-                    {((c.value / (somaC(porCat, (x) => x.value) || 1)) * 100).toFixed(0)}%
-                  </span>
-                  <span style={{ fontFamily: MONO }} className="text-xs">{brl(c.value)}</span>
-                </div>
-              ))}
-            </div>
+        {entrou > 0 && (
+          <div className="h-3 rounded-full overflow-hidden flex mb-3" style={{ background: C.bg }}
+            aria-label="Do que entrou: gastos, guardado e sobra">
+            <div style={{ background: C.out, width: `${Math.min(100, (saiu / Math.max(entrou, saiu + guardou)) * 100)}%` }} />
+            <div style={{ background: C.saved, width: `${(guardou / Math.max(entrou, saiu + guardou)) * 100}%` }} />
+            <div style={{ background: C.in, width: `${Math.max(0, sobra) / entrou * 100}%` }} />
           </div>
         )}
-      </div>
+        {frases.length > 0
+          ? <ul style={{ color: C.muted }} className="text-sm space-y-1.5">{frases.map((f, i) => <li key={i}>{f}</li>)}</ul>
+          : <Vazio>Nada lançado neste mês.</Vazio>}
+      </section>
 
-      {/* barras -------------------------------------------------------- */}
-      <div style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4">
-        <h3 style={{ fontFamily: DISPLAY }} className="font-bold mb-3">Entrou × saiu</h3>
-        <div className="h-64">
-          <Barras dados={porMes} series={[{ chave: "Entrou", cor: C.in }, { chave: "Saiu", cor: C.out }, { chave: "Não é meu", cor: C.line }]} onColuna={(m) => verLista({ titulo: m.mes, sub: "Tudo que entrou e saiu neste mês", itens: doMesK(m.chave) })} />
+      {/* por categoria: limite e comparação juntos */}
+      {cats.length > 0 && (
+        <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 style={{ fontFamily: DISPLAY }} className="font-bold">Para onde foi</h3>
+            <span style={{ color: C.muted }} className="text-xs">toque para ver os gastos</span>
+          </div>
+          <div className="space-y-3">
+            {cats.map((c) => {
+              const estourou = c.limite > 0 && c.gasto > c.limite;
+              const delta = c.gasto - c.antes;
+              const base = c.limite > 0 ? Math.max(c.limite, c.gasto) : totCat;
+              return (
+                <button key={c.id} onClick={() => verLista({ titulo: `${c.nome} · ${nomeMes(mes)}`, sub: c.limite ? `limite ${brl(c.limite)}` : "sem limite", itens: itensCat(c.id) })}
+                  className="w-full text-left">
+                  <div className="flex items-baseline justify-between gap-2 text-sm mb-1">
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span style={{ background: c.cor }} className="w-2.5 h-2.5 rounded-full shrink-0" />
+                      <span className="truncate">{c.nome}</span>
+                      {estourou && <span style={{ color: C.out }} className="text-xs shrink-0">passou {brl(c.gasto - c.limite)}</span>}
+                    </span>
+                    <span style={{ fontFamily: MONO }} className="text-sm font-semibold shrink-0">{brl(c.gasto)}</span>
+                  </div>
+                  <div style={{ background: C.bg }} className="h-2 rounded-full overflow-hidden">
+                    <div style={{ background: estourou ? C.out : c.cor, width: `${(c.gasto / (base || 1)) * 100}%` }} className="h-full" />
+                  </div>
+                  <div style={{ color: C.muted }} className="flex justify-between text-xs mt-1">
+                    <span>{c.limite > 0 ? (estourou ? `limite ${brl(c.limite)}` : `de ${brl(c.limite)} · resta ${brl(c.limite - c.gasto)}`) : `${Math.round((c.gasto / totCat) * 100)}% dos gastos`}</span>
+                    <span style={{ color: Math.abs(delta) < 0.01 ? C.muted : delta > 0 ? C.out : C.in }}>
+                      {!rAnt.qtd ? "" : Math.abs(delta) < 0.01 ? `igual a ${nomeMes(mesAnterior(mes)).slice(0, 3)}` : `${delta > 0 ? "+" : "−"}${brl(Math.abs(delta)).replace("R$ ", "")} vs ${nomeMes(mesAnterior(mes)).slice(0, 3)}`}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <p style={{ color: C.muted }} className="text-xs mt-3">Conta tudo do mês de vida, também o que ainda vai sair. Gasto de outras pessoas no seu cartão não entra.</p>
+        </section>
+      )}
+
+      {/* últimos meses */}
+      <section style={{ background: C.surface, borderColor: C.line }} className="rounded-2xl border p-4 mb-4">
+        <div className="flex flex-wrap items-center justify-between mb-2 gap-2">
+          <h3 style={{ fontFamily: DISPLAY }} className="font-bold">Mês a mês</h3>
+          <span className="flex gap-1.5 whitespace-nowrap">
+            {[3, 6, 12].map((n) => <Chip key={n} ativo={nHist === n} cor={C.ink} onClick={() => setNHist(n)}>{n} meses</Chip>)}
+          </span>
         </div>
-        <p style={{ color: C.muted }} className="text-xs mt-2">Transferências entre suas contas não aparecem aqui.</p>
-      </div>
+        <div className="h-64">
+          <Barras dados={hist} series={[{ chave: "Entrou", cor: C.in }, { chave: "Gastou", cor: C.out }, { chave: "Guardou", cor: C.saved }]}
+            onColuna={(m) => setMes(m.chave)} />
+        </div>
+        <p style={{ color: C.muted }} className="text-xs mt-2">Toque numa coluna para ver o relatório daquele mês.</p>
+      </section>
 
+      <button onClick={() => setConfigAberto(true)} style={{ borderColor: C.line, color: C.muted }}
+        className="w-full rounded-xl border py-2.5 text-sm flex items-center justify-center gap-1.5 esconder-na-impressao">
+        <Download size={14} /> Baixar relatório
+      </button>
       {configAberto && (
         <ConfigRelatorio d={d} catOf={catOf} flash={flash}
-          periodoInicial={{ janela, de, ate }} onClose={() => setConfigAberto(false)} />
+          periodoInicial={{ janela: 1, de: mes, ate: mes }} onClose={() => setConfigAberto(false)} />
       )}
     </>
   );
@@ -4676,7 +4632,7 @@ function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, on
         const { dados, aplicadas, de } = prepararDados(bruto);
         if (!dados || !Array.isArray(bruto.lancamentos)) { flash("Isto não parece um backup da caderneta"); return; }
         // mantém a configuração deste aparelho: ela não vem no arquivo
-        const novo = { ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, ateOnde: 0 };
+        const novo = { ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, rendaEstimada: d.rendaEstimada, ateOnde: 0 };
         if (d.sheetsUrl) {
           // com a planilha ligada, importar SUBSTITUI tudo lá também — antes
           // ele mesclava com o que havia na planilha e os dados se misturavam
@@ -4710,6 +4666,23 @@ function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, on
         </div>
         {aba === "mes" && (
           <>
+            <Rotulo>Quanto você espera receber por mês</Rotulo>
+            <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-3 mb-4">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="flex-1">Renda estimada</span>
+                <span style={{ color: C.muted }} className="text-sm">R$</span>
+                <input defaultValue={+d.rendaEstimada > 0 ? String(d.rendaEstimada).replace(".", ",") : ""} key={"renda" + (d.rendaEstimada || 0)}
+                  onBlur={(e) => { const v = Math.max(0, num(e.target.value)); set({ rendaEstimada: v || undefined }); }}
+                  onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+                  inputMode="decimal" placeholder="0,00" aria-label="Renda estimada por mês"
+                  style={{ background: C.bg, borderColor: C.line, fontFamily: MONO }} className="w-32 rounded-lg border px-2 py-1 text-sm text-right outline-none" />
+              </div>
+              <p style={{ color: C.muted }} className="text-xs mt-2">
+                Usada na aba Futuro para os meses que ainda não têm entrada lançada. Quando a entrada de verdade é lançada, vale ela.
+                Deixe em branco para o app usar a média do que entrou.
+              </p>
+            </div>
+
             <Rotulo>Quando começa o seu mês</Rotulo>
             <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-3 mb-2">
               <div className="flex items-center gap-2 text-sm">
