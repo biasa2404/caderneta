@@ -1570,6 +1570,7 @@ function Aplicacao() {
   const [lista, setLista] = useState(null);       // { titulo, sub, itens }
   const [conta, setConta] = useState(null);      // id da caixinha aberta
   const [lancando, setLancando] = useState(false);   // painel do botão flutuante
+  const [planejando, setPlanejando] = useState(null); // null | "novo" | o planejado sendo editado
   const [detalheSync, setDetalheSync] = useState(false);
   const [compartilhando, setCompartilhando] = useState(null);   // { quem, texto } | null
   const timer = useRef(null);
@@ -1992,9 +1993,21 @@ function Aplicacao() {
     })));
   };
 
+  /** O planejado aconteceu: vira um gasto previsto no mês dele (hoje, se for este mês). */
+  const virouReal = (i) => {
+    const contaPadrao = d.contas.find((c) => c.tipo === "banco" || c.tipo === "fisico")?.id;
+    const venc = i.quando && i.quando > mesAtual() ? `${i.quando}-01` : today();
+    const novoId = uid();
+    setD((atual) => ({ ...atual, intencoes: (atual.intencoes || []).filter((x) => x.id !== i.id),
+      lancamentos: [{ id: novoId, tipo: "saida", nome: i.nome, valor: i.valor, catId: "outros", forma: "Pix",
+        contaId: contaPadrao, vencimento: venc, pagamento: null, status: "pendente", obs: i.obs || "", reembolso: "nao", criadoEm: new Date().toISOString() }, ...atual.lancamentos] }));
+    flash("Virou um gasto previsto. Acerte valor, data e categoria");
+    setTimeout(() => setDetalhe(novoId), 50);
+  };
   const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, mudarRecorrente, removerLancamento, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
-    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha };
+    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha,
+    editarPlanejado: (i) => setPlanejando(i), novoPlanejado: () => setPlanejando("novo"), virouReal };
   const livreDoMes = resumoCiclo(d, M).livre;
   /* lembretes: ficam no topo até você fazer a operação ou fechar o aviso */
   const hojeL = today();
@@ -2074,12 +2087,32 @@ function Aplicacao() {
       </nav>
 
       {/* atalho para lançar de qualquer aba, sem rolar até o formulário */}
-      {!lancando && !detalhe && !lista && !conta && !cfg && (
-        <button onClick={() => setLancando(true)} aria-label="Novo lançamento"
-          style={{ background: C.ink, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
-          className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
-          <Plus size={26} />
-        </button>
+      {!lancando && !planejando && !detalhe && !lista && !conta && !cfg && (
+        tab === "futuro"
+          ? <button onClick={() => setPlanejando("novo")} aria-label="Novo planejado" title="Novo planejado"
+              style={{ background: C.due, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
+              className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
+              <Lightbulb size={26} />
+            </button>
+          : <button onClick={() => setLancando(true)} aria-label="Novo lançamento"
+              style={{ background: C.ink, color: "#fff", marginBottom: "env(safe-area-inset-bottom)" }}
+              className="fixed right-4 bottom-20 md:bottom-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition-transform">
+              <Plus size={26} />
+            </button>
+      )}
+
+      {planejando && (
+        <Painel titulo={planejando === "novo" ? "Novo planejado" : "Editar planejado"} sub="gasto esperado, sem data nem valor certo" onClose={() => setPlanejando(null)}>
+          <FormPlanejado key={planejando === "novo" ? "novo" : planejando.id} inicial={planejando === "novo" ? null : planejando}
+            onSalvar={(campos) => {
+              if (planejando === "novo") setD((atual) => ({ ...atual, intencoes: [...(atual.intencoes || []), { id: uid(), ...campos }] }));
+              else setD((atual) => ({ ...atual, intencoes: (atual.intencoes || []).map((x) => (x.id === planejando.id ? { ...x, ...campos } : x)) }));
+              flash(planejando === "novo" ? "Planejado anotado" : "Planejado atualizado");
+              setPlanejando(null);
+            }}
+            onApagar={() => { const i = planejando; comDesfazer(`"${i.nome}" apagado`, () => setD((atual) => ({ ...atual, intencoes: (atual.intencoes || []).filter((x) => x.id !== i.id) }))); setPlanejando(null); }}
+            onVirouReal={() => { virouReal(planejando); setPlanejando(null); }} />
+        </Painel>
       )}
 
       {lancando && (
@@ -3379,7 +3412,7 @@ function Agora({ soBlocos, d, setD, bancos, fisicas, saldoConta, pendentes, M, c
    de onde vem essa conta, o que falta pagar, e se o app bate com o banco. */
 function Mes(props) {
   const { d, catOf, subOf, contaOf, cartaoOf, anulado, up, abrir, verLista, pagar, pagarVarios, apagar, salvar,
-    liquidas, saldoConta, totalBancos, totalFisico, flash, abrirAjustes } = props;
+    liquidas, saldoConta, totalBancos, totalFisico, flash, abrirAjustes, editarPlanejado } = props;
   const hoje = today();
   const [mes, setMes] = useState(ym(hoje));
   const [conferindo, setConferindo] = useState(false);
@@ -3402,7 +3435,7 @@ function Mes(props) {
     .filter((l) => !aconteceu(l, hoje)).sort((a, b) => a.vencimento.localeCompare(b.vencimento));
   const aReceber = r.entradas.itens.filter((l) => l.status === "pendente");
 
-  const ver = (titulo, itens, sub) => verLista({ titulo: `${titulo} · ${nomeMes(mes)}`, sub, itens });
+  const ver = (titulo, itens, sub, planejados) => verLista({ titulo: `${titulo} · ${nomeMes(mes)}`, sub, itens, planejados });
   const linhas = [
     { k: "entradas", sinal: "+", nome: "Entrou para viver o mês", v: r.entradas.total, cor: C.in,
       det: r.entradas.falta ? `${brl(r.entradas.falta)} ainda vai entrar` : principal ? `${principal.nome} · ${dm(principal.pagamento || principal.vencimento)}` : "nenhuma entrada ainda",
@@ -3417,13 +3450,15 @@ function Mes(props) {
       det: r.cartao.total ? "dinheiro reservado para pagar a fatura" : "",
       cinza: r.cartaoFuturo.total ? `+ ${brl(r.cartaoFuturo.total)} ainda vai cair (já está em comprometidos)` : "",
       itens: [...r.cartao.itens, ...r.cartaoFuturo.itens] },
-    { k: "outros", sinal: "−", nome: "Gastos e comprometidos", v: r.outros.total, cor: C.out,
-      det: r.outros.falta ? `${brl(r.outros.feito)} gasto · ${brl(r.outros.falta)} a sair` : "pix, débito e dinheiro",
-      itens: r.outros.itens },
+    // planejados do mês entram aqui, como comprometidos (o livre já os desconta)
+    { k: "outros", sinal: "−", nome: "Gastos e comprometidos", v: +(r.outros.total + r.planejado).toFixed(2), cor: C.out,
+      det: r.outros.falta || r.planejado
+        ? [`${brl(r.outros.feito)} gasto`, `${brl(r.outros.falta + r.planejado)} a sair`].join(" · ")
+        : "pix, débito e dinheiro",
+      cinza: r.planejado ? `inclui ${brl(r.planejado)} planejado: ${r.planejados.map((x) => x.nome).join(", ")}` : "",
+      itens: r.outros.itens, planejados: r.planejados },
   ];
   const passou = mes < ym(hoje);
-  if (r.planejado) linhas.push({ k: "planejado", sinal: "−", nome: "Planejados (estimativa)", v: r.planejado, cor: C.due,
-    det: r.planejados.map((x) => x.nome).join(", ") });
   if (r.limites.length && !passou) linhas.push({ k: "limites", sinal: "−", nome: "Ainda cabe nos limites", v: r.reservadoLimites, cor: C.due,
     det: "reserva do que falta gastar nos limites" });
 
@@ -3465,7 +3500,7 @@ function Mes(props) {
         {/* de onde vem esse número */}
         <div style={{ borderColor: C.line }} className="mt-4 border-t">
           {linhas.filter((x) => x.v || x.cinza || x.k === "entradas").map((x) => (
-            <button key={x.k} onClick={() => x.itens && ver(x.nome, x.itens)} disabled={!x.itens}
+            <button key={x.k} onClick={() => x.itens && ver(x.nome, x.itens, undefined, x.planejados)} disabled={!x.itens}
               style={{ borderColor: C.line }} className="w-full flex items-center gap-3 py-2.5 border-b text-left">
               <span style={{ color: x.cor, fontFamily: MONO }} className="w-4 text-center font-bold">{x.sinal}</span>
               <span className="flex-1 min-w-0">
@@ -3558,15 +3593,26 @@ function Mes(props) {
       </section>
 
       {/* o que falta pagar neste mês */}
-      {(aPagar.length > 0 || aReceber.length > 0) && (
+      {(aPagar.length > 0 || aReceber.length > 0 || (!passou && r.planejados.length > 0)) && (
         <>
           <div className="flex items-baseline justify-between">
             <Rotulo>{passou ? `Ficou pendente em ${nomeMes(mes)}` : `Ainda vai sair em ${nomeMes(mes)}`}</Rotulo>
-            <span style={{ fontFamily: MONO, color: C.due }} className="text-xs font-semibold">{brl(somaC(aPagar))}</span>
+            <span style={{ fontFamily: MONO, color: C.due }} className="text-xs font-semibold">{brl(somaC(aPagar) + (passou ? 0 : r.planejado))}</span>
           </div>
           <div className="space-y-2 mb-4">
             {aPagar.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={l.cartaoId ? null : () => pagarCerto(l)} plano />)}
             {aReceber.map((l) => <Linha key={l.id} l={l} {...linhaProps} onOpen={() => abrir(l.id)} onPay={() => pagar(l)} plano />)}
+            {!passou && r.planejados.map((i) => (
+              <button key={i.id} onClick={() => editarPlanejado(i)} style={{ background: C.surface, borderColor: C.line }}
+                className="w-full text-left rounded-xl border border-dashed px-3 py-2.5 flex items-center gap-3">
+                <Lightbulb size={16} style={{ color: C.due }} className="shrink-0" />
+                <span className="flex-1 min-w-0">
+                  <span className="text-sm block truncate">{i.nome}</span>
+                  <span style={{ color: C.muted }} className="text-xs">planejado · valor estimado</span>
+                </span>
+                <span style={{ fontFamily: MONO, color: C.out }} className="text-sm font-semibold">−{brl(i.valor).replace("R$ ", "")}</span>
+              </button>
+            ))}
           </div>
         </>
       )}
@@ -3651,8 +3697,55 @@ function ConferirSaldo({ contas, saldoConta, salvar, flash, onClose }) {
   );
 }
 
+/* ============================================================ planejado */
+/** Um gasto que você espera ter num mês, sem data nem valor certo. Serve para criar e para editar. */
+function FormPlanejado({ inicial, onSalvar, onApagar, onVirouReal }) {
+  const M = mesAtual();
+  const [nome, setNome] = useState(inicial?.nome || "");
+  const [cents, setCents] = useState(Math.round((inicial?.valor || 0) * 100));
+  const [quando, setQuando] = useState(inicial ? (inicial.quando || "") : M);
+  const [obs, setObs] = useState(inicial?.obs || "");
+  const opcoes = [M, mesSeguinte(M), mesSeguinte(mesSeguinte(M))];
+  const enviar = () => {
+    if (!nome.trim()) return;
+    if (cents <= 0) return;
+    onSalvar({ nome: nome.trim(), valor: cents / 100, quando: quando || undefined, obs });
+  };
+  const ok = nome.trim() && cents > 0;
+  return (
+    <div>
+      <CampoDinheiro centavos={cents} onChange={setCents} cor={C.due} onEnter={enviar} autoFocus={!inicial} />
+      <input value={nome} onChange={(e) => setNome(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()}
+        placeholder="O que você planeja (ex.: presente da mãe)" aria-label="Nome do planejado"
+        style={{ background: C.bg, borderColor: C.line }} className="w-full rounded-xl border px-3 py-2.5 text-sm outline-none mb-4" />
+      <Rotulo>Em que mês</Rotulo>
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        {opcoes.map((k) => <Chip key={k} ativo={quando === k} cor={C.due} onClick={() => setQuando(k)}><span className="capitalize">{nomeMes(k)}</span></Chip>)}
+        <input type="month" value={quando} onChange={(e) => setQuando(e.target.value)} aria-label="Outro mês"
+          style={{ background: quando && !opcoes.includes(quando) ? C.due : C.bg, color: quando && !opcoes.includes(quando) ? "#fff" : C.ink, borderColor: C.line }}
+          className="rounded-full border px-3 py-1 text-sm outline-none" />
+        <Chip ativo={!quando} cor={C.ink} onClick={() => setQuando("")}>Ainda não sei</Chip>
+      </div>
+      <p style={{ color: C.muted }} className="text-xs mb-4">
+        {quando ? `Entra como comprometido em ${nomeMes(quando)}: já sai do livre desse mês.` : "Sem mês, fica só anotado e não mexe nas contas."}
+      </p>
+      <Rotulo>Observações</Rotulo>
+      <input value={obs} onChange={(e) => setObs(e.target.value)} placeholder="opcional"
+        style={{ background: C.bg, borderColor: C.line }} className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-4" />
+      <button onClick={enviar} disabled={!ok} style={{ background: ok ? C.ink : C.line, color: ok ? "#fff" : C.muted }}
+        className="w-full py-3 rounded-xl font-medium text-sm">{inicial ? "Salvar alterações" : "Anotar planejado"}</button>
+      {inicial && (
+        <div className="flex gap-2 mt-2">
+          <button onClick={onVirouReal} style={{ borderColor: C.line }} className="flex-1 py-2.5 rounded-xl border text-sm">Virou real</button>
+          <button onClick={onApagar} style={{ borderColor: C.line, color: C.out }} className="flex-1 py-2.5 rounded-xl border text-sm flex items-center justify-center gap-1.5"><Trash2 size={14} /> Apagar</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ================================================================ futuro */
-function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir, verLista }) {
+function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apagar, up, anulado, flash, abrir, verLista, editarPlanejado, novoPlanejado, virouReal }) {
   const [janela, setJanela] = useState(12);
   const [de, setDe] = useState("");
   const [ate, setAte] = useState("");
@@ -3688,25 +3781,6 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
   }, [d, janela, de, ate]);
   const max = Math.max(1, ...meses.map(([, ls]) => ls.filter((l) => l.status === "pendente").reduce((s, l) => s + emC(l.valor), 0) / 100));
 
-  const addIntencao = () => {
-    const v = num(valor);
-    if (!nome.trim()) { flash("Dê um nome para a intenção"); return; }
-    if (v <= 0) { flash("Digite um valor maior que zero"); return; }
-    setD((atual) => ({ ...atual, intencoes: [...(atual.intencoes || []), { id: uid(), nome, valor: v, obs: "", quando: quando || undefined }] }));
-    setNome(""); setValor(""); setQuando("");
-    flash("Intenção anotada");
-  };
-  const virarConta = (i) => {
-    // a conta vem dos seus dados de verdade, nunca de um id fixo — sem isso,
-    // a conta some silenciosamente se você não tiver uma com esse nome
-    const contaPadrao = d.contas.find((c) => c.tipo === "banco" || c.tipo === "fisico")?.id;
-    // vira conta no mês planejado (hoje, se for este mês)
-    const venc = i.quando && i.quando > mesAtual() ? `${i.quando}-01` : today();
-    setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id),
-      lancamentos: [{ id: uid(), tipo: "saida", nome: i.nome, valor: i.valor, catId: "outros", forma: "Pix",
-        contaId: contaPadrao, vencimento: venc, pagamento: null, status: "pendente", obs: "", reembolso: "nao" }, ...atual.lancamentos] }));
-    flash("Virou um gasto previsto. Toque nele para acertar valor, data e categoria");
-  };
   const totIntencoes = somaC(d.intencoes || []);
 
   /* meses recolhidos: por padrão só o primeiro fica aberto, para a tela
@@ -3840,27 +3914,20 @@ function Futuro({ d, setD, catOf, subOf, contaOf, cartaoOf, pagar, despagar, apa
         <h2 style={{ fontFamily: DISPLAY }} className="text-lg font-bold flex items-center gap-2"><Lightbulb size={18} /> Planejados</h2>
         <span style={{ fontFamily: MONO, color: C.muted }} className="text-sm">{brl(totIntencoes)}</span>
       </div>
-      <p style={{ color: C.muted }} className="text-sm mb-3">Gastos que você planeja. Com mês marcado, entram na previsão de quanto vai sobrar; sem mês, ficam só anotados.</p>
+      <p style={{ color: C.muted }} className="text-sm mb-3">Gastos que você espera ter. Com mês marcado, entram como comprometidos desse mês; sem mês, ficam só anotados. Toque em um para editar.</p>
       <div className="space-y-2 mb-3">
         {(d.intencoes || []).map((i) => (
           <div key={i.id} style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2.5 flex items-center gap-3">
-            <span className="flex-1 text-sm">{i.nome}{i.quando && <span style={{ color: C.muted }} className="text-xs"> · {mesLabel(i.quando)}</span>}</span>
-            <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
-            <button onClick={() => virarConta(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virou real</button>
-            <button onClick={() => setD((atual) => ({ ...atual, intencoes: atual.intencoes.filter((x) => x.id !== i.id) }))} style={{ color: C.muted }}><Trash2 size={14} /></button>
+            <button onClick={() => editarPlanejado(i)} className="flex-1 min-w-0 text-left flex items-center gap-3">
+              <span className="flex-1 text-sm truncate">{i.nome}<span style={{ color: C.muted }} className="text-xs"> · {i.quando ? mesLabel(i.quando) : "sem mês"}</span></span>
+              <span style={{ fontFamily: MONO }} className="text-sm font-semibold">{brl(i.valor)}</span>
+            </button>
+            <button onClick={() => virouReal(i)} style={{ borderColor: C.line }} className="rounded-lg border px-2 py-1 text-xs">virou real</button>
           </div>
         ))}
       </div>
-      <div className="flex flex-wrap gap-2">
-        <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="O que você quer fazer"
-          style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <input value={valor} onChange={(e) => setValor(e.target.value)} placeholder="Valor" inputMode="decimal"
-          onKeyDown={(e) => e.key === "Enter" && addIntencao()}
-          style={{ background: C.surface, borderColor: C.line }} className="w-24 rounded-xl border px-3 py-2 text-sm outline-none" />
-        <input type="month" value={quando} onChange={(e) => setQuando(e.target.value)} aria-label="Mês planejado"
-          style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border px-3 py-2 text-sm outline-none" />
-        <button onClick={addIntencao} style={{ background: C.ink, color: "#fff" }} className="px-4 py-2 rounded-xl text-sm">Anotar</button>
-      </div>
+      <button onClick={novoPlanejado} style={{ borderColor: C.due, color: C.due }}
+        className="w-full rounded-xl border border-dashed py-2.5 text-sm flex items-center justify-center gap-1.5"><Lightbulb size={15} /> Novo planejado</button>
     </>
   );
 }
@@ -5145,9 +5212,9 @@ const Resumo = ({ rot, v, cor, cru }) => (
 );
 
 /** Lista filtrada: o que compõe um número que você tocou. */
-function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, cartaoOf, anulado, up, abrir }) {
+function ListaFiltrada({ titulo, sub, itens, planejados = [], onClose, catOf, subOf, contaOf, cartaoOf, anulado, up, abrir, editarPlanejado }) {
   const entrou = itens.filter((l) => l.tipo === "entrada").reduce((s, l) => s + emC(l.valor), 0) / 100;
-  const saiu = itens.filter((l) => l.tipo === "saida" && !anulado(l)).reduce((s, l) => s + emC(l.valor), 0) / 100;
+  const saiu = (itens.filter((l) => l.tipo === "saida" && !anulado(l)).reduce((s, l) => s + emC(l.valor), 0) + planejados.reduce((s, i) => s + emC(i.valor), 0)) / 100;
   const trans = itens.filter((l) => l.tipo === "transferencia").reduce((s, l) => s + emC(l.valor), 0) / 100;
 
   return (
@@ -5157,9 +5224,21 @@ function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, car
         {entrou > 0 && <Resumo rot="Entrou" v={entrou} cor={C.in} />}
         {trans > 0 && <Resumo rot="Movido" v={trans} cor={C.tr} />}
         <Resumo rot="Lançamentos" v={itens.length} cor={C.muted} cru />
+        {planejados.length > 0 && <Resumo rot="Planejados" v={planejados.length} cor={C.muted} cru />}
       </div>
-      {itens.length === 0 ? <Vazio>Nada neste recorte.</Vazio> : (
+      {itens.length === 0 && planejados.length === 0 ? <Vazio>Nada neste recorte.</Vazio> : (
         <div className="space-y-2">
+          {planejados.map((i) => (
+            <button key={i.id} onClick={() => { onClose(); editarPlanejado(i); }} style={{ background: C.surface, borderColor: C.line }}
+              className="w-full text-left rounded-xl border border-dashed px-3 py-2.5 flex items-center gap-3">
+              <Lightbulb size={16} style={{ color: C.due }} className="shrink-0" />
+              <span className="flex-1 min-w-0">
+                <span className="text-sm block truncate">{i.nome}</span>
+                <span style={{ color: C.muted }} className="text-xs">planejado · valor estimado{i.obs ? ` · ${i.obs}` : ""}</span>
+              </span>
+              <span style={{ fontFamily: MONO, color: C.out }} className="text-sm font-semibold">−{brl(i.valor).replace("R$ ", "")}</span>
+            </button>
+          ))}
           {itens.slice().sort((a, b) => (b.pagamento || b.vencimento).localeCompare(a.pagamento || a.vencimento))
             .map((l) => (
               <Linha key={l.id} l={l} catOf={catOf} subOf={subOf} contaOf={contaOf} cartaoOf={cartaoOf}
