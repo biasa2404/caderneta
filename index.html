@@ -1190,14 +1190,15 @@ function buscar(lancamentos, termo, ref = {}) {
    que ainda está pendente — o que já foi pago é história e não se reescreve
    sozinho. */
 
-const CAMPOS_PROPAGAVEIS = ["valor", "catId", "subId", "forma", "contaId", "cartaoId"];
+const CAMPOS_PROPAGAVEIS = ["nome", "valor", "catId", "subId", "forma", "contaId", "cartaoId", "deQuem"];
 
 /** Só vale perguntar o escopo quando um campo que faz sentido propagar
     mudou de verdade. Data, status e observação são sempre só desta
     ocorrência — perguntar por eles a cada edição seria atrito à toa. */
 function precisaEscolherEscopo(l, campos) {
   if (!l.recId) return false;
-  return CAMPOS_PROPAGAVEIS.some((k) => campos[k] !== undefined && campos[k] !== l[k]);
+  const mudouDia = !!campos.vencimento && !!l.vencimento && campos.vencimento.slice(8, 10) !== l.vencimento.slice(8, 10);
+  return mudouDia || CAMPOS_PROPAGAVEIS.some((k) => k in campos && (campos[k] ?? null) !== (l[k] ?? null));
 }
 
 /** Edita uma ocorrência de conta fixa com o escopo escolhido. */
@@ -1206,9 +1207,19 @@ function editarComEscopo(d, l, campos, escopo) {
   if (escopo === "esta" || !l.recId) {
     return { ...d, lancamentos: d.lancamentos.map((x) => (x.id === l.id ? { ...x, ...campos, editadoEm } : x)) };
   }
+  // mudou o dia: a definição e as outras cobranças mudam de dia, cada uma no seu mês
+  const novoDia = campos.vencimento && l.vencimento && campos.vencimento.slice(8, 10) !== l.vencimento.slice(8, 10) ? +campos.vencimento.slice(8, 10) : null;
+  const noDia = (venc) => {
+    const [ano, mes] = venc.split("-");
+    return `${ano}-${mes}-${String(Math.min(novoDia, new Date(+ano, +mes, 0).getDate())).padStart(2, "0")}`;
+  };
   const defPatch = {};
-  for (const k of CAMPOS_PROPAGAVEIS) if (campos[k] !== undefined) defPatch[k] = campos[k];
-  const recorrentes = d.recorrentes.map((r) => (r.id === l.recId ? { ...r, ...defPatch } : r));
+  for (const k of CAMPOS_PROPAGAVEIS) if (k in campos && k !== "nome") defPatch[k] = campos[k] ?? undefined;
+  // o nome só vai para a definição se você mudou mesmo (senão "Chatgpt (parte de X)" seria regravado à toa)
+  if ("nome" in campos && campos.nome !== l.nome) defPatch.nome = campos.nome;
+  const recorrentes = d.recorrentes.map((r) => (r.id === l.recId ? { ...r, ...defPatch, ...(novoDia ? { dia: Math.min(28, novoDia) } : {}) } : r));
+  // mudou de quem é: as outras cobranças passam a ser (ou deixam de ser) "a cobrar"
+  const outrosPatch = "deQuem" in defPatch ? { ...defPatch, reembolso: defPatch.deQuem ? "aguardando" : "nao" } : defPatch;
 
   const alvo = new Set(d.lancamentos
     .filter((x) => x.recId === l.recId && x.status === "pendente" &&
@@ -1220,7 +1231,7 @@ function editarComEscopo(d, l, campos, escopo) {
   // setembro virar uma cópia de agosto, com o mesmo identificador.
   const lancamentos = d.lancamentos.map((x) => {
     if (x.id === l.id) return { ...x, ...campos, editadoEm };
-    if (alvo.has(x.id)) return { ...x, ...defPatch, editadoEm };
+    if (alvo.has(x.id)) return { ...x, ...outrosPatch, ...(novoDia ? { vencimento: noDia(x.vencimento) } : {}), editadoEm };
     return x;
   });
   return { ...d, recorrentes, lancamentos };
@@ -1919,6 +1930,13 @@ function Aplicacao() {
 
   /** Cria uma conta fixa a partir do formulário de lançar, sem passar por Ajustes. */
   const criarRecorrente = (rec) => setD((atual) => ({ ...atual, recorrentes: [...atual.recorrentes, rec] }));
+  /** Muda o ritmo, o fim ou o lembrete de uma recorrência; a geração refaz os meses sozinha. */
+  const mudarRecorrente = (recId, patch) => setD((atual) => ({ ...atual,
+    recorrentes: atual.recorrentes.map((r) => (r.id === recId ? { ...r, ...patch } : r)),
+    ...("lembrarDias" in patch ? { lancamentos: atual.lancamentos.map((l) => (l.recId === recId && l.status === "pendente"
+      ? { ...l, lembrarDias: patch.lembrarDias ?? undefined, lembreteFechado: undefined, editadoEm: new Date().toISOString() } : l)) } : {}) }));
+  /** Tira um lançamento para pôr outro no lugar (ex.: virou parcelado na edição). */
+  const removerLancamento = (id) => setD((atual) => ({ ...atual, lancamentos: atual.lancamentos.filter((x) => x.id !== id) }));
 
   /* As duas funções abaixo são o modelo de calendário aplicado a dinheiro:
      "só esta / esta e as seguintes / todas" — ver editarComEscopo/
@@ -1974,7 +1992,7 @@ function Aplicacao() {
     })));
   };
 
-  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
+  const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, mudarRecorrente, removerLancamento, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
     pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha };
   const livreDoMes = resumoCiclo(d, M).livre;
@@ -2211,21 +2229,21 @@ function CompartilharTexto({ quem, texto, onClose, flash }) {
 /** A mesma pergunta que qualquer calendário faz ao mexer num evento que se
     repete — só que explicada em dinheiro, não em datas de reunião. */
 function EscopoRecorrencia({ acao, nome, onEscolher, onClose }) {
-  const titulo = acao === "apagar" ? `Apagar "${nome}"` : `Salvar "${nome}"`;
+  const titulo = acao === "apagar" ? `Apagar "${nome}"` : `Alterar "${nome}"`;
   const OPCOES = acao === "apagar" ? [
     ["esta", "Só esta cobrança", "Os outros meses continuam exatamente como estavam."],
     ["seguintes", "Esta e as próximas", "A conta fixa termina aqui. O que já passou fica no histórico."],
     ["todas", "Toda a conta fixa", "Apaga a recorrência inteira. O que já foi pago continua guardado."],
   ] : [
-    ["esta", "Só esta cobrança", "As próximas continuam com os valores de antes."],
-    ["seguintes", "Esta e as próximas", "Atualiza esta e todas as que ainda não aconteceram."],
-    ["todas", "Toda a conta fixa", "Atualiza todas as pendentes, mesmo as de meses anteriores."],
+    ["esta", "Somente este", "Os outros meses continuam como estavam."],
+    ["seguintes", "Este e os próximos", "Muda este e todos os que vêm depois dele."],
+    ["todos", "Todos", "Muda todos que ainda não foram pagos, também os de meses anteriores. O que já foi pago fica como está."],
   ];
   return (
-    <Painel titulo={titulo} sub="É uma conta fixa — o que isso deve afetar?" onClose={onClose}>
+    <Painel titulo={titulo} sub={acao === "apagar" ? "É uma conta que se repete. O que apagar?" : "É um lançamento que se repete. Alterar quais?"} onClose={onClose}>
       <div className="space-y-2">
         {OPCOES.map(([k, t, desc]) => (
-          <button key={k} onClick={() => onEscolher(k)}
+          <button key={k} onClick={() => onEscolher(k === "todos" ? "todas" : k)}
             style={{ background: C.surface, borderColor: C.line }}
             className="w-full text-left rounded-xl border p-3 flex items-start gap-3 transition-transform active:scale-[0.99]">
             <Repeat size={16} style={{ color: C.due }} className="shrink-0 mt-0.5" />
@@ -2565,7 +2583,12 @@ function reduzForm(e, a) {
 /* ---------------------------------------------------- formulário de lançamento */
 /* Vive fora da aba para poder aparecer também no painel do botão flutuante:
    o mesmo formulário, com o mesmo comportamento, em dois lugares. */
-function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, inicial }) {
+function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, inicial, editando, onEditado, onSubstituir }) {
+  /* editando: o mesmo formulário, já preenchido com o lançamento. Parcela de
+     um parcelado e cobrança de uma recorrência têm regras próprias (abaixo). */
+  const ed = editando || null;
+  const recEd = ed?.recId ? (d.recorrentes || []).find((r) => r.id === ed.recId) : null;
+  const parcelaEd = !!ed?.grupo;
   /* ------------------------------------- um estado só, com as regras no redutor */
   // saída começa na categoria do último gasto que você lançou na mão
   // (não em "Contas fixas", que quase nunca é o caso de um gasto avulso)
@@ -2584,7 +2607,16 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     catPadrao,
   };
 
-  const [f, despachar] = useMeuReducer(reduzForm, ref, (r) => (inicial ? { ...formInicial(r), ...inicial(r) } : formInicial(r)));
+  const doEditado = (r) => ({
+    tipo: ed.tipo, pago: ed.status === "pago", cents: Math.round((ed.valor || 0) * 100), nome: ed.nome || "",
+    catId: ed.catId || catPadrao(ed.tipo), subId: ed.subId || null, forma: ed.forma || "Pix",
+    instr: ed.cartaoId && ed.tipo !== "transferencia" ? ed.cartaoId : (ed.contaId || r.primeiraConta),
+    destino: ed.destinoId || r.primeiroDestino, venc: ed.vencimento || r.hoje, parcelas: "1", obs: ed.obs || "",
+    reemb: !ed.deQuem && (ed.reembolso === "aguardando" || ed.reembolso === "recebido"),
+    deQuem: ed.deQuem || "", dividir: [], repetir: !!recEd, fimRepeticao: recEd?.fim || { tipo: "nunca" },
+  });
+  const [f, despachar] = useMeuReducer(reduzForm, ref, (r) => (ed ? { ...formInicial(r), ...doEditado(r) }
+    : inicial ? { ...formInicial(r), ...inicial(r) } : formInicial(r)));
   const dispara = (a) => despachar({ ...a, ref });
   const campo = (nome, valor) => dispara({ tipo: "campo", campo: nome, valor });
   const escolher = (nome, valor, marca) => dispara({ tipo: "escolher", campo: nome, valor, marca });
@@ -2595,17 +2627,19 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
   const nParc = Math.min(48, Math.max(1, parseInt(parcelas, 10) || 1));
   const v = cents / 100;
   const credito = forma === "Crédito";
-  const [mais, setMais] = useState(false);
+  const [mais, setMais] = useState(!!(ed && (ed.obs || ed.reembolso === "aguardando" || ed.reembolso === "recebido")));
   const [deOutro, setDeOutro] = useState(false);   // "de quem é" aberto
   const [nomeNovo, setNomeNovo] = useState("");
   const [outraTodo, setOutraTodo] = useState(false);
-  const [cada, setCada] = useState(1);              // conta fixa: a cada quantos meses
-  const [lembrar, setLembrar] = useState(null);     // null = sem lembrete; 0, 1, 3 = dias antes   // "todo de" alguém que ainda não está na lista
+  const [cada, setCada] = useState(recEd?.cada || 1);              // conta fixa: a cada quantos meses
+  const [lembrar, setLembrar] = useState(ed ? (ed.lembrarDias ?? null) : null);
+  const [pagoEm, setPagoEm] = useState(ed?.pagamento || "");       // só na edição: quando foi pago de fato
+  const [acertado, setAcertado] = useState(ed?.reembolso === "recebido");   // só na edição     // null = sem lembrete; 0, 1, 3 = dias antes   // "todo de" alguém que ainda não está na lista
   const ontem = iso(new Date(Date.now() - 864e5));
   const modo = repetir ? "fixa" : nParc > 1 || parcelas === "" ? "parcelado" : "uma";
   const partes = dividir.length + 1;
   /* entrada: para qual mês de vida é esse dinheiro. null = o app decide pela data */
-  const [refEscolhido, setRefEscolhido] = useState(null);
+  const [refEscolhido, setRefEscolhido] = useState(ed?.ref || null);
   const refAuto = venc ? cicloDaEntrada(venc, diaVirada(d)) : mesAtual();
   const refFinal = refEscolhido || refAuto;
 
@@ -2613,11 +2647,11 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     .filter((n) => n && n !== "eu"))];
 
   /* ---------------------------------------------- sugestão pelo histórico */
-  const atalhos = useMemo(() => atalhosFrequentes(d.lancamentos, tipo), [d.lancamentos, tipo]);
+  const atalhos = useMemo(() => (ed ? [] : atalhosFrequentes(d.lancamentos, tipo)), [d.lancamentos, tipo]);
 
   const digitarNome = (txt) => {
     campo("nome", txt);
-    if (tipo === "transferencia") return;
+    if (tipo === "transferencia" || ed) return;
     const s = sugerirPor(txt, d.lancamentos, tipo);
     if (s) dispara({ tipo: "sugerir", sugestao: s });
     else campo("sugestao", null);
@@ -2639,9 +2673,22 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
       ...(tipo === "entrada" && refFinal !== refAuto ? { ref: refFinal } : {}),
       ...(lembrar != null && !pago ? { lembrarDias: lembrar } : {}),
     };
-    const comConta = tipo === "transferencia" ? { ...base, contaId: instr, destinoId: destino }
-      : credito ? { ...base, cartaoId: instr, contaId: null }
-      : { ...base, contaId: instr, cartaoId: null };
+    if (ed) {
+      // o que só a edição tem: data em que foi pago, se já acertou, e limpar o que você tirou
+      const temAcerto = !!(deQuem.trim() || reemb);
+      Object.assign(base, {
+        pagamento: pago ? (pagoEm || venc) : null,
+        reembolso: temAcerto ? (acertado ? "recebido" : "aguardando") : "nao",
+        ref: tipo === "entrada" && refFinal !== refAuto ? refFinal : undefined,
+        lembrarDias: lembrar != null && !pago ? lembrar : undefined,
+        lembreteFechado: lembrar === (ed.lembrarDias ?? null) ? ed.lembreteFechado : undefined,
+        parcelas: parcelaEd ? ed.parcelas : base.parcelas,
+        conferir: false,
+      });
+    }
+    const comConta = tipo === "transferencia" ? { ...base, contaId: instr, destinoId: destino, cartaoId: undefined, catId: null, subId: null }
+      : credito ? { ...base, cartaoId: instr, contaId: null, destinoId: undefined }
+      : { ...base, contaId: instr, cartaoId: null, destinoId: undefined };
 
     // dividido: a sua parte fica com você, a de cada pessoa vai para "A cobrar"
     const pedacos = tipo === "saida" && dividir.length
@@ -2650,6 +2697,12 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
           : { ...comConta, valor, nome: `${comConta.nome} (parte de ${dividir[i - 1]})`, deQuem: dividir[i - 1], reembolso: "aguardando" })
       : [comConta];
 
+    if (ed) {
+      // lançamento solto que virou parcelado, recorrente ou dividido: sai o antigo e entram os novos
+      const virouOutro = !recEd && !parcelaEd && (modo !== "uma" || pedacos.length > 1);
+      if (!virouOutro) { onEditado({ campos: pedacos[0], modo, rep: { cada, fim: fimRepeticao, lembrar } }); return; }
+      onSubstituir();
+    }
     if (repetir && tipo === "saida") {
       // cria a definição da conta fixa e, na mesma tacada, o lançamento deste
       // mês — com o mesmo "src" que gerar() usaria, para não duplicar no
@@ -2669,6 +2722,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
     } else {
       salvar(pedacos);
     }
+    if (ed) { onEditado(null); return; }
     dispara({ tipo: "limpar" }); setMais(false); setRefEscolhido(null); setDeOutro(false); setOutraTodo(false); setCada(1); setLembrar(null);
     aoSalvar?.(continuar.current);
     continuar.current = false;
@@ -2800,15 +2854,27 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
             style={{ background: venc !== today() && venc !== ontem ? C.ink : C.bg, color: venc !== today() && venc !== ontem ? "#fff" : C.ink, borderColor: C.line }}
             className="rounded-full border px-3 py-1 text-sm outline-none" />
         </div>
+        {ed && pago && tipo !== "transferencia" && (
+          <div className="flex items-center gap-2 mb-4 -mt-2">
+            <span style={{ color: C.muted }} className="text-xs">{tipo === "entrada" ? "Recebido em" : "Pago em"}</span>
+            <input type="date" value={pagoEm || venc} onChange={(e) => e.target.value && setPagoEm(e.target.value)} aria-label="Data do pagamento"
+              style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="rounded-full border px-3 py-1 text-sm outline-none" />
+          </div>
+        )}
 
         {tipo === "saida" && (
           <>
             <Rotulo>Repete?</Rotulo>
+            {parcelaEd ? (
+              <p style={{ color: C.due }} className="text-xs mb-4">Parcela {ed.parcela} de {ed.parcelas}. O que você mudar aqui vale só para ela.</p>
+            ) : (
             <div className="flex flex-wrap gap-2 mb-2">
-              <Chip ativo={modo === "uma"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); campo("parcelas", "1"); }}>Uma vez</Chip>
-              <Chip ativo={modo === "parcelado"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); if (nParc < 2) campo("parcelas", "2"); }}>Parcelado</Chip>
+              <Chip ativo={modo === "uma"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); campo("parcelas", "1"); }}>{recEd ? "Parar de repetir" : "Uma vez"}</Chip>
+              {!recEd && <Chip ativo={modo === "parcelado"} cor={C.ink} onClick={() => { dispara({ tipo: "repetir", valor: false }); if (nParc < 2) campo("parcelas", "2"); }}>Parcelado</Chip>}
               <Chip ativo={modo === "fixa"} cor={C.saved} onClick={() => dispara({ tipo: "repetir", valor: true })}>Recorrente</Chip>
             </div>
+            )}
+            {recEd && modo === "uma" && <p style={{ color: C.muted }} className="text-xs mb-4">Esta fica, e as próximas cobranças deixam de ser geradas.</p>}
             {modo === "parcelado" && (
               <div className="flex items-center gap-2 mb-4">
                 <input inputMode="numeric" value={parcelas} aria-label="Número de parcelas"
@@ -2861,7 +2927,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
               ))}
               <Chip ativo={outraTodo || (!!deQuem && !pessoas.includes(deQuem))} cor={C.tr}
                 onClick={() => { setOutraTodo(true); setDeOutro(false); campo("dividir", []); if (pessoas.includes(deQuem)) escolher("deQuem", ""); }}>Todo de outra pessoa</Chip>
-              <Chip ativo={dividir.length > 0 || deOutro} cor={C.tr} onClick={() => { setDeOutro(!deOutro); setOutraTodo(false); escolher("deQuem", ""); }}>Dividido</Chip>
+              {!recEd && !parcelaEd && <Chip ativo={dividir.length > 0 || deOutro} cor={C.tr} onClick={() => { setDeOutro(!deOutro); setOutraTodo(false); escolher("deQuem", ""); }}>Dividido</Chip>}
             </div>
             {(outraTodo || (!!deQuem && !pessoas.includes(deQuem))) && (
               <input value={deQuem} onChange={(e) => escolher("deQuem", e.target.value)} placeholder="Nome de quem comprou" autoFocus
@@ -2892,6 +2958,11 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
               </div>
             )}
             {deQuem.trim() && <p style={{ color: C.tr }} className="text-xs mb-2">Entra na fatura, mas não conta como gasto seu. Vai para a cobrança de {deQuem}.</p>}
+            {ed && (deQuem.trim() || reemb) && (
+              <label className="flex items-center gap-2 text-sm mb-2">
+                <input type="checkbox" checked={acertado} onChange={(e) => setAcertado(e.target.checked)} /> {deQuem.trim() ? `${deQuem.trim()} já me pagou` : "Já fui reembolsada"}
+              </label>
+            )}
             <div className="mb-2" />
           </>
         )}
@@ -2930,7 +3001,7 @@ function FormLancamento({ d, catOf, salvar, criarRecorrente, flash, aoSalvar, in
               className="flex-1 py-3 rounded-xl border font-medium text-sm">Salvar e lançar outro</button>
           )}
           <button onClick={enviar} disabled={v <= 0} style={{ background: v > 0 ? C.ink : C.line, color: v > 0 ? "#fff" : C.muted }}
-            className="flex-1 py-3 rounded-xl font-medium text-sm transition-transform active:scale-[0.98]">Salvar</button>
+            className="flex-1 py-3 rounded-xl font-medium text-sm transition-transform active:scale-[0.98]">{ed ? "Salvar alterações" : "Salvar"}</button>
         </div>
       </section>
   );
@@ -5101,7 +5172,7 @@ function ListaFiltrada({ titulo, sub, itens, onClose, catOf, subOf, contaOf, car
 }
 
 /** Detalhe de um lançamento, com edição de todos os campos. */
-function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, editarLancamentoComEscopo, apagarLancamentoComEscopo, duplicarLancamento, salvar, pagar, despagar, anulado, flash }) {
+function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, upVarios, apagar, criarRecorrente, mudarRecorrente, removerLancamento, editarLancamentoComEscopo, apagarLancamentoComEscopo, duplicarLancamento, salvar, pagar, despagar, anulado, flash }) {
   const [edit, setEdit] = useState(false);
   const [f, setF] = useState(null);
   const [pedirEscopo, setPedirEscopo] = useState(null);   // null | { acao: "editar"|"apagar", campos? }
@@ -5151,6 +5222,28 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
     flash("Lançamento atualizado");
   };
 
+  /* resultado do formulário de edição. null = já virou outro lançamento (parcelado, recorrente, dividido) */
+  const aplicarEdicao = (r) => {
+    if (!r) { onClose(); flash("Lançamento atualizado"); return; }
+    const { campos, modo, rep } = r;
+    const rec = l.recId ? d.recorrentes.find((x) => x.id === l.recId) : null;
+    if (rec) {
+      if (modo === "uma") {
+        mudarRecorrente(rec.id, { fim: { tipo: "data", data: l.vencimento } });   // esta fica, as próximas somem
+      } else {
+        const patch = {};
+        if ((rec.cada || 1) !== rep.cada) { patch.cada = rep.cada; patch.inicio = rep.cada > 1 ? ym(l.vencimento) : undefined; }
+        if (JSON.stringify(rec.fim || { tipo: "nunca" }) !== JSON.stringify(rep.fim)) patch.fim = rep.fim;
+        if ((rec.lembrarDias ?? null) !== rep.lembrar) patch.lembrarDias = rep.lembrar ?? undefined;
+        if (Object.keys(patch).length) mudarRecorrente(rec.id, patch);
+      }
+      if (modo !== "uma" && precisaEscolherEscopo(l, campos)) { setPedirEscopo({ acao: "editar", campos }); return; }
+    }
+    up(l.id, campos);
+    setEdit(false);
+    flash(rec && modo === "uma" ? "Atualizado. As próximas cobranças não vão mais aparecer" : "Lançamento atualizado");
+  };
+
   const escolherEscopo = (escopo) => {
     if (pedirEscopo.acao === "editar") { editarLancamentoComEscopo(l, pedirEscopo.campos, escopo); onClose(); }
     else { apagarLancamentoComEscopo(l, escopo); onClose(); }
@@ -5185,8 +5278,7 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
                 Desfazer</button>)}
           {edit
             ? <>
-                <button onClick={() => { setF({ ...l, cents: Math.round(l.valor * 100) }); setEdit(false); }} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm">Cancelar</button>
-                <button onClick={salvarEdicao} style={{ background: C.ink }} className="flex-1 rounded-xl py-2.5 text-sm text-white font-medium">Salvar</button>
+                <button onClick={() => setEdit(false)} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm">Cancelar edição</button>
               </>
             : <button onClick={() => setEdit(true)} style={{ background: C.surface, borderColor: C.line }} className="flex-1 rounded-xl border py-2.5 text-sm flex items-center justify-center gap-1.5"><Pencil size={15} /> Editar</button>}
           {!edit && (
@@ -5206,146 +5298,14 @@ function Detalhe({ l, d, onClose, abrir, catOf, subOf, contaOf, cartaoOf, up, up
       }>
 
       {edit ? (
-        <div className="space-y-3">
-          <div><Rotulo>Tipo</Rotulo>
-            <div style={{ background: C.surface }} className="flex p-1 rounded-xl">
-              {[["saida", "Saída", ArrowUpRight], ["entrada", "Entrada", ArrowDownLeft], ["transferencia", "Transferência", ArrowLeftRight]].map(([k, t, Ic]) => (
-                <button key={k} onClick={() => setF({ ...f, tipo: k,
-                    catId: k === "transferencia" ? null : (f.catId || d.categorias[0]?.id),
-                    subId: undefined,
-                    destinoId: k === "transferencia" ? (f.destinoId || d.contas.find((c) => c.id !== f.contaId)?.id) : undefined,
-                    forma: k === "transferencia" ? "Pix" : f.forma,
-                    cartaoId: k === "transferencia" ? undefined : f.cartaoId,
-                    deQuem: k === "saida" ? f.deQuem : undefined })}
-                  style={{ background: f.tipo === k ? C.bg : "transparent", color: f.tipo === k ? CORTIPO[k] : C.muted }}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium">
-                  <Ic size={14} /> {t}</button>
-              ))}
-            </div>
-          </div>
-
-          <CampoDinheiro centavos={f.cents} onChange={(c) => setF({ ...f, cents: c })} cor={CORTIPO[f.tipo]} />
-
-          <div><Rotulo>Descrição</Rotulo>
-            <input value={f.nome} onChange={(e) => setF({ ...f, nome: e.target.value })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
-
-          <div><Rotulo>{f.tipo === "transferencia" ? "Situação" : f.tipo === "entrada" ? "Recebimento" : "Pagamento"}</Rotulo>
-            <div className="flex gap-2">
-              {(f.tipo === "saida" ? [["pago", "Pago"], ["pendente", "Pendente"]]
-                : f.tipo === "entrada" ? [["pago", "Recebido"], ["pendente", "A receber"]]
-                : [["pago", "Já fiz"], ["pendente", "Planejada"]]).map(([k, t]) => (
-                <button key={k} onClick={() => setF({ ...f, status: k, pagamento: k === "pago" ? (f.pagamento || f.vencimento) : null })}
-                  style={{ background: f.status === k ? (k === "pago" ? CORTIPO[f.tipo] : C.due) : C.bg, color: f.status === k ? "#fff" : C.muted, borderColor: C.line }}
-                  className="flex-1 rounded-xl border py-2 text-sm font-medium">{t}</button>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div><Rotulo>Vencimento</Rotulo>
-              <input type="date" value={f.vencimento} onChange={(e) => setF({ ...f, vencimento: e.target.value })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
-            {f.status === "pago" && (
-              <div><Rotulo>{f.tipo === "entrada" ? "Recebido em" : "Pago em"}</Rotulo>
-                <input type="date" value={f.pagamento || ""} onChange={(e) => setF({ ...f, pagamento: e.target.value })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
-            )}
-          </div>
-
-          {f.tipo !== "transferencia" && (
-            <div className="grid grid-cols-2 gap-3">
-              <div><Rotulo>Categoria</Rotulo>
-                <select value={f.catId || ""} onChange={(e) => setF({ ...f, catId: e.target.value, subId: undefined })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none">
-                  {d.categorias.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
-                </select></div>
-              <div><Rotulo>Subcategoria</Rotulo>
-                <select value={f.subId || ""} onChange={(e) => setF({ ...f, subId: e.target.value || undefined })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none">
-                  <option value="">—</option>
-                  {subs.map((s) => <option key={s.id} value={s.id}>{s.nome}</option>)}
-                </select></div>
-            </div>
-          )}
-
-          {f.tipo !== "transferencia" && (
-            <div><Rotulo>Forma de pagamento</Rotulo>
-              <div className="flex flex-wrap gap-1.5">
-                {FORMAS.map((x) => (
-                  <button key={x} onClick={() => setF({ ...f, forma: x,
-                      cartaoId: x === "Crédito" ? (f.cartaoId || d.cartoes[0]?.id) : undefined,
-                      contaId: x === "Crédito" ? undefined : (f.contaId || contasUso[0]?.id) })}
-                    style={{ background: f.forma === x ? C.ink : C.bg, color: f.forma === x ? "#fff" : C.muted, borderColor: C.line }}
-                    className="rounded-lg border px-2.5 py-1.5 text-xs">{x}</button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {f.forma === "Crédito" && f.tipo !== "transferencia" ? (
-            <div><Rotulo>Cartão</Rotulo>
-              <select value={f.cartaoId || ""} onChange={(e) => setF({ ...f, cartaoId: e.target.value, contaId: undefined })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none">
-                {d.cartoes.map((c) => <option key={c.id} value={c.id}>{c.nome}{c.dono !== "eu" ? ` (de ${c.dono})` : ""}</option>)}
-              </select></div>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              <div><Rotulo>{f.tipo === "transferencia" ? "De" : "Conta"}</Rotulo>
-                <select value={f.contaId || ""} onChange={(e) => setF({ ...f, contaId: e.target.value, cartaoId: undefined })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none">
-                  {d.contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
-                </select></div>
-              {f.tipo === "transferencia" && (
-                <div><Rotulo>Para</Rotulo>
-                  <select value={f.destinoId || ""} onChange={(e) => setF({ ...f, destinoId: e.target.value })} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none">
-                    {d.contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
-                  </select></div>
-              )}
-            </div>
-          )}
-
-          {f.tipo === "saida" && (
-            <>
-              <div><Rotulo>Este gasto é de outra pessoa?</Rotulo>
-                <input value={f.deQuem || ""} onChange={(e) => setF({ ...f, deQuem: e.target.value.trim() || undefined, reembolso: e.target.value.trim() ? (f.reembolso === "recebido" ? "recebido" : "aguardando") : "nao" })}
-                  placeholder="deixe vazio se for seu" style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none" /></div>
-              {!f.deQuem && (
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={f.reembolso === "aguardando" || f.reembolso === "recebido"}
-                    onChange={(e) => setF({ ...f, reembolso: e.target.checked ? "aguardando" : "nao" })} /> Vou ser reembolsada
-                </label>
-              )}
-            </>
-          )}
-
-          {irmas.length <= 1 && f.tipo !== "transferencia" && (
-            <div><Rotulo>Parcelas</Rotulo>
-              <div className="flex items-center gap-2">
-                <CampoInteiro valor={f.parcelas || 1} onValor={(n) => setF({ ...f, parcelas: n })} min={1} max={48}
-                  style={{ ...inp, fontFamily: MONO }} className="w-20 rounded-xl border px-3 py-2 text-sm outline-none" />
-                {(f.parcelas || 1) > 1 && (
-                  <span style={{ color: C.due, fontFamily: MONO }} className="text-xs">
-                    vira {f.parcelas}× de {brl(Math.floor(f.cents / f.parcelas) / 100)}
-                  </span>
-                )}
-              </div>
-              {(f.parcelas || 1) > 1 && (
-                <p style={{ color: C.muted }} className="text-xs mt-1">
-                  Ao salvar, este lançamento é substituído por {f.parcelas} parcelas mensais.
-                </p>
-              )}
-            </div>
-          )}
-
-          <div><Rotulo>Observações</Rotulo>
-            <textarea value={f.obs || ""} onChange={(e) => setF({ ...f, obs: e.target.value })} rows={2} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none resize-none" /></div>
-
-          {irmas.length > 1 && (
-            <div style={{ background: C.due + "14" }} className="rounded-xl p-3">
-              <p style={{ color: C.due }} className="text-xs mb-2">
-                Esta é a parcela {l.parcela} de {l.parcelas}. A edição vale só para ela.
-              </p>
-              {irmas.some((x) => x.status === "pendente" && x.id !== l.id) && (
-                <button onClick={aplicarNasAbertas} style={{ borderColor: C.due, color: C.due }}
-                  className="w-full rounded-lg border py-1.5 text-xs">
-                  Usar este valor nas parcelas ainda abertas
-                </button>
-              )}
-            </div>
+        <div className="-mx-1">
+          <FormLancamento key={l.id + ":" + (l.editadoEm || "")} d={d} catOf={catOf} salvar={salvar} criarRecorrente={criarRecorrente} flash={flash}
+            editando={l} onEditado={aplicarEdicao} onSubstituir={() => removerLancamento(l.id)} />
+          {irmas.length > 1 && irmas.some((x) => x.status === "pendente" && x.id !== l.id) && (
+            <button onClick={aplicarNasAbertas} style={{ borderColor: C.due, color: C.due }}
+              className="w-full rounded-lg border py-2 text-xs mt-3">
+              Usar o valor de {brl(l.valor)} nas parcelas ainda abertas
+            </button>
           )}
         </div>
       ) : (
