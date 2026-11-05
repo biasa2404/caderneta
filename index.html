@@ -405,6 +405,49 @@ function baseDe(d) {
   return b;
 }
 
+/* ============================================================ nuvem (Supabase) */
+/* Endereço e chave pública do projeto Supabase da caderneta. A chave pública
+   pode ficar aqui: quem protege os dados é o login + a regra "dono = você". */
+const SUPA = { url: "https://ipkbtemnhwtigamshqyj.supabase.co", chave: "sb_publishable_nR2zs8ff0UCr4iwICGGobg_V6D1TLud" };
+const CHAVE_SESSAO = "caderneta:sessao";
+const lerSessao = () => { try { return JSON.parse(localStorage.getItem(CHAVE_SESSAO)) || null; } catch { return null; } };
+const gravarSessao = (s) => { try { s ? localStorage.setItem(CHAVE_SESSAO, JSON.stringify(s)) : localStorage.removeItem(CHAVE_SESSAO); } catch {} };
+const nuvemPronta = () => !!(SUPA.url && SUPA.chave);
+const sessaoDe = (j) => ({ access_token: j.access_token, refresh_token: j.refresh_token,
+  expira: Date.now() + (j.expires_in || 3600) * 1000, email: j.user?.email });
+
+async function nuvemAuth(caminho, corpo) {
+  const r = await fetch(`${SUPA.url}/auth/v1/${caminho}`, { method: "POST",
+    headers: { apikey: SUPA.chave, "Content-Type": "application/json" }, body: JSON.stringify(corpo) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error_description || j.msg || j.message || ("erro " + r.status));
+  return j;
+}
+const nuvemEntrar = async (email, senha) => { const s = sessaoDe(await nuvemAuth("token?grant_type=password", { email, password: senha })); gravarSessao(s); return s; };
+const nuvemCriarConta = (email, senha) => nuvemAuth("signup", { email, password: senha });
+let renovando = null;
+async function nuvemToken(forcar) {
+  const s = lerSessao();
+  if (!s) throw new Error("sem login");
+  if (!forcar && s.expira - Date.now() > 60000) return s.access_token;
+  // um pedido de renovação por vez: dois ao mesmo tempo invalidam um ao outro
+  renovando ||= nuvemAuth("token?grant_type=refresh_token", { refresh_token: s.refresh_token })
+    .then((j) => { const n = sessaoDe(j); gravarSessao({ ...n, email: n.email || s.email }); return n.access_token; })
+    .finally(() => { renovando = null; });
+  return renovando;
+}
+/** Mesmo protocolo da planilha: { desde, mudancas } → { ok, mudancas, agora }. */
+async function nuvemSincronizar(corpo) {
+  const chamar = async (token) => fetch(`${SUPA.url}/rest/v1/rpc/sincronizar`, { method: "POST",
+    headers: { apikey: SUPA.chave, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ desde: corpo.desde || 0, mudancas: corpo.mudancas || [] }) });
+  let r = await chamar(await nuvemToken());
+  if (r.status === 401) r = await chamar(await nuvemToken(true));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || ("resposta " + r.status));
+  return j;
+}
+
 /* =============================================================== tokens */
 const C = {
   bg: "#E9EBF1", surface: "#FFFFFF", line: "#D9DCE6", ink: "#141824", muted: "#727892",
@@ -1568,6 +1611,8 @@ function App() {
 
 function Aplicacao() {
   const [d, setD] = useState(null);
+  const [nuvem, setNuvem] = useState(() => (nuvemPronta() ? lerSessao() : null));   // sessão no Supabase
+  const temRemoto = (dados) => !!((nuvemPronta() && lerSessao()) || dados?.sheetsUrl);
   const [tab, setTab] = useState("mes");
   const [cfg, setCfg] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1630,7 +1675,7 @@ function Aplicacao() {
       // Sem isso, mudar o endereço ou a frase secreta em Ajustes — que não são
       // dado financeiro — deixava a pílula presa em "salvando", porque a
       // sincronia desistia sem avisar que tinha terminado.
-      if (!d.sheetsUrl) { setSync({ estado: "local", quando: null }); return; }
+      if (!temRemoto(d)) { setSync({ estado: "local", quando: null }); return; }
       const { mudancas } = detectarMudancas(baseSync.current, d);
       if (!mudancas.length) return;
       setSync((s) => (s.estado === "erro" ? s : { ...s, estado: "pendente" }));
@@ -1646,9 +1691,21 @@ function Aplicacao() {
   const dRef = useRef(null);
   dRef.current = d;
 
+  /** Fala com a nuvem (Supabase) se você entrou nela; senão, com a planilha. */
+  const pedirRemoto = async (dados, corpo) => {
+    if (nuvemPronta() && lerSessao()) return nuvemSincronizar(corpo);
+    const r = await fetch(dados.sheetsUrl, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ v: 4, segredo: dados.sheetsSegredo || "", ...corpo }) });
+    if (!r.ok) throw new Error("resposta " + r.status);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.erro || "recusado");
+    return j;
+  };
+
+  const ligando = useRef(false);   // entrando na nuvem: nada de sincronia comum até decidir quem vale
   const sincronizar = async (dados) => {
-    const url = dados?.sheetsUrl;
-    if (!url) { setSync({ estado: "local", quando: null }); return; }
+    if (ligando.current || !dados) return;
+    if (!temRemoto(dados)) { setSync({ estado: "local", quando: null }); return; }
     if (!navigator.onLine) { setSync({ estado: "offline", quando: null }); return; }
     if (emCurso.current) { repetir.current = true; return; }   // já tem uma indo; refaz ao terminar
     emCurso.current = true;
@@ -1657,17 +1714,8 @@ function Aplicacao() {
     setSync((s) => ({ ...s, estado: "enviando" }));
 
     try {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },  // evita a permissão extra do navegador
-        body: JSON.stringify({
-          v: 4, segredo: dados.sheetsSegredo || "",
-          desde: dados.ateOnde || 0, mudancas,   // "ateOnde" é a numeração da planilha, não um horário
-        }),
-      });
-      if (!r.ok) throw new Error("resposta " + r.status);
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.erro || "recusado");
+      // "ateOnde" é a numeração da planilha/nuvem, não um horário
+      const j = await pedirRemoto(dados, { desde: dados.ateOnde || 0, mudancas });
 
       // Aplica sobre o estado ATUAL, não sobre a foto tirada antes do pedido.
       // Sem isso, qualquer coisa lançada durante a espera da rede seria apagada.
@@ -1689,7 +1737,7 @@ function Aplicacao() {
         baseSync.current = baseDe(final);
         return final;
       });
-      const aplicadas = (j.mudancas || []).length;
+      const aplicadas = aplicarMudancas(dRef.current || estado, j.mudancas || []).aplicadas;
       setSync({ estado: "ok", quando: Date.now(), trouxe: aplicadas });
       if (aplicadas) flash(`${aplicadas} ${aplicadas === 1 ? "novidade" : "novidades"} de outro aparelho`);
       tentativa.current = 0;
@@ -1717,20 +1765,12 @@ function Aplicacao() {
    */
   const substituirPlanilha = async (dadosCertos) => {
     const dados = dadosCertos || dRef.current;
-    const url = dados?.sheetsUrl;
-    if (!url) { flash("A sincronia com a planilha não está ligada neste aparelho"); return false; }
+    if (!temRemoto(dados)) { flash("A sincronia não está ligada neste aparelho"); return false; }
     if (!navigator.onLine) { flash("Sem internet. Tente de novo quando conectar."); return false; }
     while (emCurso.current) await new Promise((ok) => setTimeout(ok, 300));
     emCurso.current = true;
     setSync((x) => ({ ...x, estado: "enviando" }));
-    const pedir = async (corpo) => {
-      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ v: 4, segredo: dados.sheetsSegredo || "", ...corpo }) });
-      if (!r.ok) throw new Error("resposta " + r.status);
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.erro || "recusado");
-      return j;
-    };
+    const pedir = (corpo) => pedirRemoto(dados, corpo);
     try {
       // 1. o que existe hoje na planilha
       const j1 = await pedir({ desde: 0, mudancas: [] });
@@ -1764,19 +1804,14 @@ function Aplicacao() {
       Joga fora o que está neste aparelho e fica exatamente com o que está lá. */
   const baixarDaPlanilha = async () => {
     const dados = dRef.current;
-    const url = dados?.sheetsUrl;
-    if (!url) { flash("A sincronia com a planilha não está ligada neste aparelho"); return false; }
+    if (!temRemoto(dados)) { flash("A sincronia não está ligada neste aparelho"); return false; }
     if (!navigator.onLine) { flash("Sem internet. Tente de novo quando conectar."); return false; }
     while (emCurso.current) await new Promise((ok) => setTimeout(ok, 300));
     emCurso.current = true;
     clearTimeout(timer.current);
     setSync((x) => ({ ...x, estado: "enviando" }));
     try {
-      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ v: 4, segredo: dados.sheetsSegredo || "", desde: 0, mudancas: [] }) });
-      if (!r.ok) throw new Error("resposta " + r.status);
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.erro || "recusado");
+      const j = await pedirRemoto(dados, { desde: 0, mudancas: [] });
       const { estado: remoto } = aplicarMudancas({}, j.mudancas || []);
       const soLocal = Object.fromEntries(SO_LOCAL.filter((k) => k in dados).map((k) => [k, dados[k]]));
       const limpo = sanear({ ...soLocal, ...Object.fromEntries(COLECOES.map((c) => [c, remoto[c] || []])) });
@@ -1785,20 +1820,43 @@ function Aplicacao() {
       const final = gerar({ ...limpo, ateOnde: j.agora, v: ESQUEMA });
       setD(final);
       setSync({ estado: "ok", quando: Date.now(), trouxe: 0 });
-      flash(`Pronto: ${limpo.lancamentos.length} lançamentos baixados da planilha`);
+      flash(`Pronto: ${limpo.lancamentos.length} lançamentos baixados`);
       return true;
     } catch (e) {
       setSync({ estado: "erro", quando: null, msg: e.message });
-      flash("Não deu para falar com a planilha: " + e.message);
+      flash("Não deu para baixar: " + e.message);
       return false;
     } finally {
       emCurso.current = false;
     }
   };
 
+  /** Entrou na nuvem: se ela está vazia, este aparelho manda tudo (é a mudança
+      da planilha para o Supabase); se já tem dados, este aparelho fica igual a ela. */
+  const ligarNuvem = async (s) => {
+    // trava a sincronia comum: senão este aparelho mandaria tudo dele para a
+    // nuvem antes de saber se ela já tem dados (e misturaria os dois)
+    ligando.current = true;
+    clearTimeout(timer.current); clearTimeout(retry.current);
+    while (emCurso.current) await new Promise((ok) => setTimeout(ok, 200));
+    const dados = dRef.current;
+    try {
+      const j = await nuvemSincronizar({ desde: 0, mudancas: [] });
+      ligando.current = false;
+      if ((j.mudancas || []).length === 0) {
+        const ok = await substituirPlanilha({ ...dados, sheetsUrl: undefined, sheetsSegredo: undefined, ateOnde: 0 });
+        if (ok) flash("Pronto: seus dados foram para a nuvem");
+      } else {
+        await baixarDaPlanilha();
+      }
+    } catch (e) { flash("Entrou, mas não deu para sincronizar: " + e.message); }
+    finally { ligando.current = false; setNuvem(s); }
+  };
+  const sairNuvem = () => { gravarSessao(null); setNuvem(null); baseSync.current = null; setSync({ estado: "local", quando: null }); flash("Você saiu da nuvem. Os dados continuam neste aparelho."); };
+
   /* busca novidades: ao voltar para o app, ao reconectar, e a cada minuto */
   useEffect(() => {
-    if (!d?.sheetsUrl) return;
+    if (!d || !temRemoto(d)) return;
     // usa dRef.current, não "d": este efeito só se recria quando o endereço
     // muda, então "d" aqui ficaria congelado na primeira vez — e cada
     // sincronia automática mandaria uma foto antiga por cima da atual
@@ -1812,7 +1870,7 @@ function Aplicacao() {
       document.removeEventListener("visibilitychange", puxar);
       window.removeEventListener("online", puxar);
     };
-  }, [d?.sheetsUrl, d?.sheetsSegredo]);
+  }, [!!d, d?.sheetsUrl, d?.sheetsSegredo, nuvem?.email]);
 
   /* --------------------------------------------------------- avisos e desfazer */
   const relogioToast = useRef(null);
@@ -2014,7 +2072,7 @@ function Aplicacao() {
   };
   const ctx = { d, setD, catOf, subOf, contaOf, cartaoOf, saldoConta, anulado, alheio, aCobrar, salvar, up, upVarios, comDesfazer, pagar, abrir: setDetalhe, verLista: setLista, verConta: setConta, pagarVarios, despagar, apagar, apagarRecorrencia, criarRecorrente, mudarRecorrente, removerLancamento, duplicarLancamento, atualizarValorPendentes, atualizarDiaPendentes, editarLancamentoComEscopo, apagarLancamentoComEscopo, abrirCompartilhar: (quem, texto) => setCompartilhando({ quem, texto }), flash,
     liquidas, bancos, fisicas, guardadas, investidas, totalBancos, totalFisico, totalGuardado, totalInvestido,
-    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha,
+    pendentes, comprometidoMes, comprometidoGeral, aReceber, disponivel, M, abrirAjustes: (aba) => setCfg(aba || true), substituirPlanilha, baixarDaPlanilha, nuvem, ligarNuvem, sairNuvem, temRemoto,
     editarPlanejado: (i) => setPlanejando(i), novoPlanejado: () => setPlanejando("novo"), virouReal };
   const livreDoMes = resumoCiclo(d, M).livre;
   /* lembretes: ficam no topo até você fazer a operação ou fechar o aviso */
@@ -4438,6 +4496,58 @@ function Relatorio({ d, catOf, verLista, flash }) {
   );
 }
 
+/* ============================================================ nuvem */
+function EntrarNuvem({ nuvem, ligarNuvem, sairNuvem, flash, temPlanilha }) {
+  const [email, setEmail] = useState(nuvem?.email || "");
+  const [senha, setSenha] = useState("");
+  const [indo, setIndo] = useState(false);
+  const [criando, setCriando] = useState(false);
+  const inp = { background: C.bg, borderColor: C.line, color: C.ink };
+  const entrar = async () => {
+    if (!email.trim() || !senha) { flash("Preencha e-mail e senha"); return; }
+    setIndo(true);
+    try {
+      if (criando) {
+        await nuvemCriarConta(email.trim(), senha);
+        flash("Conta criada. Confirme pelo e-mail que chegou e depois entre aqui.");
+        setCriando(false);
+      } else {
+        const s = await nuvemEntrar(email.trim(), senha);
+        setSenha("");
+        await ligarNuvem(s);
+      }
+    } catch (e) {
+      flash(/invalid login/i.test(e.message) ? "E-mail ou senha errados" : /not confirmed/i.test(e.message) ? "Confirme o e-mail antes (veja sua caixa de entrada)" : e.message);
+    } finally { setIndo(false); }
+  };
+  if (nuvem) return (
+    <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border p-3 mb-4">
+      <Rotulo>Sincronia na nuvem</Rotulo>
+      <p className="text-sm mb-1">Conectada como <b>{nuvem.email}</b></p>
+      <p style={{ color: C.muted }} className="text-xs mb-3">Celular e notebook ficam iguais sozinhos. Só você, com este login, vê esses dados.</p>
+      <BotaoConfirma onConfirm={sairNuvem} pergunta="Sair da nuvem neste aparelho?" cor={C.out} estilo={{ borderColor: C.line }}
+        className="w-full rounded-xl border py-2 text-sm">Sair</BotaoConfirma>
+    </div>
+  );
+  return (
+    <div style={{ background: C.surface, borderColor: C.line }} className="rounded-xl border p-3 mb-4">
+      <Rotulo>Sincronia na nuvem</Rotulo>
+      <p style={{ color: C.muted }} className="text-xs mb-2">
+        Entre com seu e-mail para o celular e o notebook ficarem iguais.
+        {temPlanilha ? " Na primeira vez, se a nuvem estiver vazia, tudo deste aparelho vai para lá e a planilha deixa de ser usada." : " Se a nuvem já tiver dados, este aparelho fica igual a ela."}
+      </p>
+      <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="seu e-mail" autoComplete="email"
+        style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-2" />
+      <input value={senha} onChange={(e) => setSenha(e.target.value)} type="password" placeholder="senha" autoComplete={criando ? "new-password" : "current-password"}
+        onKeyDown={(e) => e.key === "Enter" && entrar()} style={inp} className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-2" />
+      <button onClick={entrar} disabled={indo} style={{ background: C.ink, color: "#fff" }} className="w-full rounded-xl py-2.5 text-sm mb-2">
+        {indo ? "Aguarde…" : criando ? "Criar minha conta" : "Entrar"}</button>
+      <button onClick={() => setCriando(!criando)} style={{ color: C.tr }} className="text-xs underline underline-offset-2">
+        {criando ? "já tenho conta: entrar" : "primeira vez? criar conta"}</button>
+    </div>
+  );
+}
+
 /* ================================================================ ajustes */
 /** Começar do zero: guarda uma cópia, apaga o histórico e parte dos saldos que você informa.
     Mantém contas, cartões e categorias (com limites), que dão trabalho para recriar. */
@@ -4563,7 +4673,7 @@ function DesfazerMistura({ d, flash, substituirPlanilha, setD, onClose }) {
   const aplicar = async () => {
     const contas = d.contas.map((c) => ({ ...c, saldoInicial: saldos[c.id] != null && saldos[c.id] !== "" ? num(saldos[c.id]) : c.saldoInicial }));
     const novo = gerar({ ...d, contas, lancamentos: plano.lancamentos, recorrentes: plano.recorrentes, intencoes: plano.intencoes, cancelados: plano.cancelados });
-    if (d.sheetsUrl) { if (!(await substituirPlanilha(novo))) return; }
+    if (d.sheetsUrl || (nuvemPronta() && lerSessao())) { if (!(await substituirPlanilha(novo))) return; }
     else setD(novo);
     flash(`Separado: ${plano.saem} lançamentos antigos saíram`);
     onClose();
@@ -4608,7 +4718,7 @@ function DesfazerMistura({ d, flash, substituirPlanilha, setD, onClose }) {
   );
 }
 
-function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
+function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, nuvem, ligarNuvem, sairNuvem, temRemoto, d, setD, onClose, flash, comDesfazer, apagarRecorrencia, atualizarValorPendentes, atualizarDiaPendentes }) {
   const [aba, setAba] = useState(abaInicial || "mes");
   const [zerando, setZerando] = useState(false);
   const [separando, setSeparando] = useState(false);
@@ -4634,7 +4744,7 @@ function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, on
         if (!dados || !Array.isArray(bruto.lancamentos)) { flash("Isto não parece um backup da caderneta"); return; }
         // mantém a configuração deste aparelho: ela não vem no arquivo
         const novo = { ...dados, sheetsUrl: d.sheetsUrl, sheetsSegredo: d.sheetsSegredo, painelAgora: d.painelAgora, diaVirada: d.diaVirada, rendaEstimada: d.rendaEstimada, ateOnde: 0 };
-        if (d.sheetsUrl) {
+        if (temRemoto(d)) {
           // com a planilha ligada, importar SUBSTITUI tudo lá também — antes
           // ele mesclava com o que havia na planilha e os dados se misturavam
           flash("Importando e substituindo na planilha…");
@@ -4708,7 +4818,9 @@ function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, on
         {aba === "recorrentes" && <AbaRecorrentes d={d} set={set} flash={flash} apagarRecorrencia={apagarRecorrencia} atualizarValorPendentes={atualizarValorPendentes} atualizarDiaPendentes={atualizarDiaPendentes} />}
         {aba === "dados" && (
           <>
-            <Rotulo>Sincronia com a planilha</Rotulo>
+            {nuvemPronta() && <EntrarNuvem nuvem={nuvem} ligarNuvem={ligarNuvem} sairNuvem={sairNuvem} flash={flash} temPlanilha={!!d.sheetsUrl} />}
+            {(!nuvemPronta() || !nuvem) && <>
+            <Rotulo>{nuvemPronta() ? "Sincronia com a planilha (antiga)" : "Sincronia com a planilha"}</Rotulo>
             <input value={d.sheetsUrl || ""} onChange={(e) => set({ ...d, sheetsUrl: e.target.value.trim() })}
               placeholder="Cole aqui o endereço do Apps Script"
               style={{ background: C.bg, borderColor: C.line, color: C.ink }} className="w-full rounded-xl border px-3 py-2 text-sm outline-none mb-2" />
@@ -4720,28 +4832,29 @@ function Ajustes({ abaInicial, substituirPlanilha, baixarDaPlanilha, d, setD, on
                 ? "Cada alteração vai para a planilha em segundo plano. Se a internet cair, o app guarda e reenvia sozinho quando voltar."
                 : "Sem endereço, os dados ficam só neste aparelho. Exporte o JSON de vez em quando para não depender de um lugar só."}
             </p>
-            {d.sheetsUrl && (
+            </>}
+            {temRemoto(d) && (
               <>
                 <button onClick={() => { set({ ateOnde: 0 }); flash("Buscando tudo de novo…"); }}
                   style={{ background: C.surface, borderColor: C.line }}
                   className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
-                  <RotateCcw size={15} /> Conferir tudo com a planilha
+                  <RotateCcw size={15} /> Conferir tudo com {nuvem ? "a nuvem" : "a planilha"}
                 </button>
                 <p style={{ color: C.muted }} className="text-xs mb-4">
                   O app já traz as novidades sozinho ao abrir e a cada minuto. Use isto só se desconfiar que faltou alguma coisa.
                 </p>
                 <BotaoConfirma onConfirm={() => baixarDaPlanilha()}
-                  pergunta="Trocar tudo deste aparelho pelo da planilha?" cor={C.out} estilo={{ borderColor: C.line }}
+                  pergunta={nuvem ? "Trocar tudo deste aparelho pelo da nuvem?" : "Trocar tudo deste aparelho pelo da planilha?"} cor={C.out} estilo={{ borderColor: C.line }}
                   className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
-                  <Download size={15} /> A planilha é a certa: baixar tudo
+                  <Download size={15} /> {nuvem ? "A nuvem é a certa: baixar tudo" : "A planilha é a certa: baixar tudo"}
                 </BotaoConfirma>
                 <p style={{ color: C.muted }} className="text-xs mb-4">
                   Troca o que está neste aparelho pelo que está na planilha. Use depois de restaurar uma versão da planilha.
                 </p>
                 <BotaoConfirma onConfirm={async () => { if (await substituirPlanilha()) flash("Pronto: este aparelho agora vale para todos"); }}
-                  pergunta="Apagar na planilha o que não está aqui?" cor={C.out} estilo={{ borderColor: C.line }}
+                  pergunta={nuvem ? "Apagar na nuvem o que não está aqui?" : "Apagar na planilha o que não está aqui?"} cor={C.out} estilo={{ borderColor: C.line }}
                   className="w-full rounded-xl border py-2 text-sm flex items-center justify-center gap-1.5 mb-2">
-                  <Upload size={15} /> Este aparelho é o certo: substituir a planilha
+                  <Upload size={15} /> {nuvem ? "Este aparelho é o certo: substituir a nuvem" : "Este aparelho é o certo: substituir a planilha"}
                 </BotaoConfirma>
                 <p style={{ color: C.muted }} className="text-xs mb-4">
                   Para quando os dados de dois aparelhos se misturaram. O que não estiver neste aparelho é apagado na planilha,
