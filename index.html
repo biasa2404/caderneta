@@ -3516,13 +3516,14 @@ function Mes(props) {
       det: r.cartao.total ? "dinheiro reservado para pagar a fatura" : "",
       cinza: r.cartaoFuturo.total ? `+ ${brl(r.cartaoFuturo.total)} ainda vai cair (já está em comprometidos)` : "",
       itens: [...r.cartao.itens, ...r.cartaoFuturo.itens] },
-    // planejados do mês entram aqui, como comprometidos (o livre já os desconta)
-    { k: "outros", sinal: "−", nome: "Gastos e comprometidos", v: +(r.outros.total + r.planejado).toFixed(2), cor: C.out,
-      det: r.outros.falta || r.planejado
-        ? [`${brl(r.outros.feito)} gasto`, `${brl(r.outros.falta + r.planejado)} a sair`].join(" · ")
-        : "pix, débito e dinheiro",
+    // gasto = o que já aconteceu; comprometido = o que ainda vai sair (inclui planejados e crédito que ainda não caiu)
+    { k: "gastos", sinal: "−", nome: "Gastos", v: r.outros.feito, cor: C.out,
+      det: r.outros.feito ? "pix, débito e dinheiro que já saíram" : "nada gasto ainda",
+      itens: r.outros.itens.filter((l) => aconteceu(l, hoje)) },
+    { k: "comprometidos", sinal: "−", nome: "Comprometidos", v: +(r.outros.falta + r.planejado).toFixed(2), cor: C.due,
+      det: "ainda vai sair: tem destino, mas não saiu",
       cinza: r.planejado ? `inclui ${brl(r.planejado)} planejado: ${r.planejados.map((x) => x.nome).join(", ")}` : "",
-      itens: r.outros.itens, planejados: r.planejados },
+      itens: r.outros.itens.filter((l) => !aconteceu(l, hoje)), planejados: r.planejados },
   ];
   const passou = mes < ym(hoje);
   if (r.limites.length && !passou) linhas.push({ k: "limites", sinal: "−", nome: "Ainda cabe nos limites", v: r.reservadoLimites, cor: C.due,
